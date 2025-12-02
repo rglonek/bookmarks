@@ -6,17 +6,22 @@ A modern, beautiful web application for managing your bookmarks with intelligent
 
 ## What's new
 
-Added PWA support. Now mobile users can hit the "share" button, and then "Add To Home Screen". The home screen icon will behave like a full-flown app.
+### Mobile Apps (PWA + Native)
 
-How to Install the PWA:
-* On iPhone/iPad (Safari):
-  1. Visit your deployed app
-  2. Tap the Share button
-  3. Select "Add to Home Screen"
-* On Android (Chrome):
-  1. Visit your deployed app
-  2. Chrome will show an install banner, or
-  3. Tap the menu (⋮) → "Add to Home Screen" or "Install App"
+**PWA Support**: Mobile users can install directly from the browser:
+* **iPhone/iPad (Safari)**: Tap Share → "Add to Home Screen"
+* **Android (Chrome)**: Tap menu (⋮) → "Install App" or "Add to Home Screen"
+
+**Native Apps (Capacitor)**: Build real iOS/Android apps for the App Store and Play Store:
+```bash
+# Open in Xcode (iOS)
+npm run cap:ios
+
+# Open in Android Studio
+npm run cap:android
+```
+
+See [Mobile App Setup Guide](./docs/MOBILE_APP_SETUP.md) for full instructions.
 
 ## Features
 

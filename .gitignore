@@ -36,3 +36,12 @@ functions/node_modules/
 *.sln
 *.sw?
 
+# Capacitor native builds
+ios/App/Pods/
+ios/App/App.xcworkspace/
+ios/App/App.xcodeproj/xcuserdata/
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+
