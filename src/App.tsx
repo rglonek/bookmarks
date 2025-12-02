@@ -796,8 +796,10 @@ function App() {
   };
 
   const handleSignOut = async () => {
-    await auth.signOut();
-    setServerLastModified(null);
+    if (confirm('Are you sure you want to log out?')) {
+      await auth.signOut();
+      setServerLastModified(null);
+    }
   };
 
   const exportData = () => {
