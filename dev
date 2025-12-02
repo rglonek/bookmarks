@@ -1,0 +1,25 @@
+#!/bin/bash
+# install dependencies
+if [ "$1" = "install" ]; then
+  npm install
+fi
+# run lint
+if [ "$1" = "lint" ]; then
+  npm run lint
+fi
+# run tests
+if [ "$1" = "test" ]; then
+  npm test
+fi
+# build prod build
+if [ "$1" = "build" ]; then
+  npm run build
+fi
+# run dev build
+if [ "$1" = "dev" ]; then
+  npm run dev
+fi
+# preview prod build
+if [ "$1" = "preview" ]; then
+  npm run preview
+fi
