@@ -4,6 +4,20 @@ A modern, beautiful web application for managing your bookmarks with intelligent
 
 **New here? Check out the [Quick Start Guide](./docs/QUICKSTART.md)** - Get running in 5 minutes!
 
+## What's new
+
+Added PWA support. Now mobile users can hit the "share" button, and then "Add To Home Screen". The home screen icon will behave like a full-flown app.
+
+How to Install the PWA:
+* On iPhone/iPad (Safari):
+  1. Visit your deployed app
+  2. Tap the Share button
+  3. Select "Add to Home Screen"
+* On Android (Chrome):
+  1. Visit your deployed app
+  2. Chrome will show an install banner, or
+  3. Tap the menu (⋮) → "Add to Home Screen" or "Install App"
+
 ## Features
 
 ### Core Features
