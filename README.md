@@ -1,12 +1,12 @@
-# 📚 Bookmarks Manager
+# Bookmarks Manager
 
 A modern, beautiful web application for managing your bookmarks with intelligent organization and powerful search capabilities.
 
-**🚀 New here? Check out the [Quick Start Guide](./docs/QUICKSTART.md)** - Get running in 5 minutes!
+**New here? Check out the [Quick Start Guide](./docs/QUICKSTART.md)** - Get running in 5 minutes!
 
 ## Features
 
-### ✨ Core Features
+### Core Features
 - **Storage Buckets**: Organize bookmarks into multiple buckets (e.g., "Work", "Personal")
   - Automatically sorted alphabetically (A-Z)
   - Rename buckets inline with a single click
@@ -30,7 +30,7 @@ A modern, beautiful web application for managing your bookmarks with intelligent
   - Auto-scroll when dragging near the top or bottom (within 10% of screen height)
   - Maintain your preferred order independent of sort
 
-### 🎨 User Experience
+### User Experience
 - **Responsive Design**: Beautiful UI that works seamlessly on desktop, tablet, and mobile devices
 - **Auto-Extraction**: Automatically extracts title and description when you paste a URL
 - **Instant Search**: Fast, case-insensitive search across all bookmark fields
@@ -43,7 +43,7 @@ A modern, beautiful web application for managing your bookmarks with intelligent
 - **Inline Editing**: Click the edit icon on buckets and categories to rename them instantly
 - **Data Portability**: Export all data to JSON and import from JSON files
 
-### 🔍 Search Capabilities
+### Search Capabilities
 - Search by title, description, tags, notes, or URL
 - Filter by specific bucket, category, or tag
 - Instant results as you type
@@ -51,26 +51,26 @@ A modern, beautiful web application for managing your bookmarks with intelligent
 - Search everywhere or narrow down to specific locations
 - View mode applies to search results too
 
-### 🔐 Authentication & Server Storage
-- **Optional Login**: Use the app locally without an account, or login for server-side storage
-- **Dual Storage**: When logged in, bookmarks are stored both locally and on the server
-- **Account Creation**: Register directly from the login screen
-- **Session Management**: Stay logged in across browser sessions
-- **Data Sync**: Your bookmarks automatically sync to the server when authenticated
-- **Multi-Device Access**: Access your bookmarks from any device when logged in
+### Authentication & Cloud Storage
+- **Google Sign-In**: Simple one-click authentication with your Google account
+- **Cloud Storage**: Your bookmarks are stored securely in Firebase Cloud Firestore
 - **Local First**: Continue using the app offline with localStorage, syncs when you reconnect
+- **Multi-Device Access**: Access your bookmarks from any device when signed in
+- **Automatic Sync**: Changes sync automatically across devices
+- **Conflict Resolution**: Intelligent merging prevents data loss
 
 ## Tech Stack
 
 - **Frontend**: React 18 + TypeScript + Vite
 - **Styling**: Tailwind CSS
-- **Backend**: Express.js (for URL metadata extraction and data storage)
+- **Backend**: Firebase
+  - Firebase Authentication (Google Sign-In)
+  - Cloud Firestore (database)
+  - Cloud Functions (URL metadata extraction)
+  - Firebase Hosting
 - **Storage**: 
   - Browser LocalStorage (offline-first)
-  - File-based server storage (persistent across restarts)
-  - See [STORAGE.md](./docs/STORAGE.md) for details
-- **Security**: bcrypt password hashing
-- **Authentication**: Session-based with secure tokens
+  - Cloud Firestore (cloud sync)
 - **Build Tool**: Vite
 - **Testing**: Vitest + React Testing Library
 
@@ -87,19 +87,108 @@ cd Bookmarks
 npm install
 ```
 
+## Firebase Setup
+
+### 1. Create a Firebase Project
+
+1. Go to [Firebase Console](https://console.firebase.google.com/)
+2. Click "Create a project" (or "Add project")
+3. Enter a project name (e.g., "my-bookmarks")
+4. Follow the setup wizard (you can disable Google Analytics if you prefer)
+5. Click "Create project"
+
+### 2. Upgrade to Blaze Plan
+
+Cloud Functions require the Blaze (pay-as-you-go) plan for external network access:
+
+1. In Firebase Console, click the "Spark" label in the bottom-left
+2. Select "Upgrade" and choose "Blaze"
+3. Enter billing information (you won't be charged unless you exceed free tier limits)
+
+**Note**: The free tier is generous enough for personal use - you likely won't pay anything.
+
+### 3. Enable Authentication
+
+1. In Firebase Console, go to **Build → Authentication**
+2. Click "Get started"
+3. Go to **Sign-in method** tab
+4. Click "Google" and enable it
+5. Set a support email and click "Save"
+
+### 4. Create Firestore Database
+
+1. Go to **Build → Firestore Database**
+2. Click "Create database"
+3. Choose "Start in production mode"
+4. Select a location close to your users
+5. Click "Enable"
+
+### 5. Get Firebase Configuration
+
+1. Go to **Project Settings** (gear icon) → **General**
+2. Scroll down to "Your apps" and click the web icon (`</>`)
+3. Register your app with a nickname (e.g., "bookmarks-web")
+4. Copy the Firebase configuration object
+
+### 6. Configure Environment Variables
+
+Copy the example environment file and fill in your Firebase values:
+
+```bash
+cp .env.example .env
+```
+
+Then edit `.env` with your Firebase configuration:
+
+| Variable | Description |
+|----------|-------------|
+| `VITE_FIREBASE_API_KEY` | Your Firebase API key |
+| `VITE_FIREBASE_AUTH_DOMAIN` | Auth domain (usually `your_project_id.firebaseapp.com`) |
+| `VITE_FIREBASE_PROJECT_ID` | Your Firebase project ID |
+| `VITE_FIREBASE_STORAGE_BUCKET` | Storage bucket (usually `your_project_id.appspot.com`) |
+| `VITE_FIREBASE_MESSAGING_SENDER_ID` | Cloud Messaging sender ID |
+| `VITE_FIREBASE_APP_ID` | Your Firebase app ID |
+
+> **Note**: Never commit your `.env` file to version control. It's already in `.gitignore`.
+
+### 7. Deploy Cloud Functions
+
+Install Firebase CLI globally (if not already installed):
+
+```bash
+npm install -g firebase-tools
+```
+
+Login and initialize Firebase:
+
+```bash
+firebase login
+firebase init
+```
+
+During init, select:
+- **Firestore**: Yes
+- **Functions**: Yes (JavaScript)
+- **Hosting**: Yes
+- Use existing project: Select your project
+
+Deploy:
+
+```bash
+firebase deploy
+```
+
 ## Usage
 
 ### Development Mode
 
-Start both the frontend and backend servers:
+Start the development server:
 
 ```bash
 npm run dev
 ```
 
-This will start:
-- Frontend: http://localhost:3000
-- Backend: http://localhost:3001
+This starts the frontend at http://localhost:5173
 
 ### Production Build
 
@@ -111,32 +200,21 @@ npm run build
 
 This creates optimized static files in the `dist/` directory.
 
-### Production Deployment
+### Deploy to Firebase
 
-Run the application in production mode:
+Deploy everything (hosting, functions, rules):
 
-**Linux/macOS:**
 ```bash
-npm start
+npm run deploy
 ```
 
-**Windows:**
+Or deploy individually:
+
 ```bash
-npm run start:windows
+npm run deploy:hosting   # Just the web app
+npm run deploy:functions # Just Cloud Functions
+npm run deploy:rules     # Just Firestore rules
 ```
-
-The server will:
-- Serve the built React app
-- Handle API requests
-- Run on port 3001 (configurable via `PORT` env variable)
-
-**📖 For detailed deployment instructions**, see [DEPLOYMENT.md](./docs/DEPLOYMENT.md) which covers:
-- Building and running in production
-- Environment variables
-- Docker deployment
-- Cloud platform deployment (Heroku, Railway, Render, etc.)
-- Security best practices
-- Monitoring and troubleshooting
 
 ### Testing
 
@@ -148,8 +226,6 @@ npm run test:watch    # Watch mode (re-runs on changes)
 npm run test:ui       # Interactive browser UI
 npm run test:coverage # Generate coverage report
 ```
-
-**Test Coverage**: 33 tests covering storage, merge logic, and API functions. See [TESTING.md](./docs/TESTING.md) for details.
 
 ### Linting
 
@@ -168,11 +244,15 @@ Bookmarks/
 │   ├── App.tsx           # Main application component
 │   ├── types.ts          # TypeScript type definitions
 │   ├── storage.ts        # LocalStorage management
-│   ├── api.ts            # API client for backend
+│   ├── api.ts            # Firebase API client
+│   ├── firebase.ts       # Firebase initialization
 │   ├── main.tsx          # Application entry point
 │   └── index.css         # Global styles
-├── backend/
-│   └── server.js         # Express server for URL metadata extraction
+├── functions/
+│   ├── index.js          # Cloud Functions (metadata extraction)
+│   └── package.json      # Functions dependencies
+├── firebase.json         # Firebase configuration
+├── firestore.rules       # Firestore security rules
 ├── index.html            # HTML template
 ├── package.json          # Dependencies and scripts
 ├── vite.config.ts        # Vite configuration
@@ -182,23 +262,21 @@ Bookmarks/
 
 ## How to Use
 
-### Authentication (Optional)
+### Authentication
 
-#### Using Without Login (Local Mode)
-- The app works perfectly without logging in
+#### Using Without Sign-In (Local Mode)
+- The app works without signing in
 - All bookmarks are stored in your browser's localStorage
 - Data persists across browser sessions
 - No account needed
 
-#### Creating an Account & Logging In
-1. Click the "🔒 Login" button in the header
-2. Click "Need an account? Register"
-3. Enter a username and password
-4. Click "Register & Login"
-5. Your existing local bookmarks will be synced to the server
+#### Signing In with Google
+1. Click the "Sign in with Google" button in the header
+2. Select your Google account
+3. Your existing local bookmarks will be synced to the cloud
 
-#### Benefits of Logging In
-- **Server Backup**: Your bookmarks are stored on the server
+#### Benefits of Signing In
+- **Cloud Backup**: Your bookmarks are stored in Firebase
 - **Multi-Device Sync**: Access bookmarks from any device with intelligent merge
 - **Data Recovery**: Don't lose bookmarks if you clear browser storage
 - **Dual Storage**: Still stored locally for offline access
@@ -206,32 +284,26 @@ Bookmarks/
 - **Conflict Resolution**: Timestamp-based merging prevents data loss
 
 #### Syncing & Merge Strategy
-When logged in, the app uses an intelligent merge strategy to keep your bookmarks in sync:
+When signed in, the app uses an intelligent merge strategy:
 
 - **Automatic Sync**: 
   - Syncs immediately when window gains focus
-  - Checks for server updates every 60 seconds when focused
+  - Checks for cloud updates every 60 seconds when focused
   - Stops polling when window loses focus (saves resources)
   
 - **Manual Refresh**: 
-  - Click the "🔄 Refresh" button to manually sync with server
+  - Click the "Refresh" button to manually sync with cloud
   
 - **Merge Logic**:
-  - Bookmarks from both local and server are combined
+  - Bookmarks from both local and cloud are combined
   - For duplicate bookmarks, the one with the latest `updatedAt` timestamp wins
   - New bookmarks from either side are preserved
-  - No data is lost - both browsers can add bookmarks simultaneously
-  
-- **Multi-Device Use**:
-  - Add bookmarks on Browser A and Browser B at the same time
-  - When you refresh or switch focus, changes merge automatically
-  - The most recent edit to any bookmark takes precedence
-  - All unique bookmarks from both devices are preserved
+  - No data is lost - multiple devices can add bookmarks simultaneously
 
-#### Logging Out
-- Click the "👤 Logout (username)" button to sign out
+#### Signing Out
+- Click your name/avatar to sign out
 - Local bookmarks remain in your browser
-- Server bookmarks are preserved and will sync when you login again
+- Cloud bookmarks are preserved and will sync when you sign in again
 
 ### Creating Buckets
 1. Click the "+ New Bucket" button in the header
@@ -247,7 +319,7 @@ When logged in, the app uses an intelligent merge strategy to keep your bookmark
 ### Adding Bookmarks
 1. Select a bucket and category
 2. Click "+ Add Bookmark"
-3. Paste the URL (title and description will auto-populate)
+3. Paste the URL (title and description will auto-populate if signed in)
 4. Edit or add additional information:
    - Title (required)
    - Description
@@ -264,41 +336,29 @@ When logged in, the app uses an intelligent merge strategy to keep your bookmark
 3. Results update instantly as you type
 
 ### Managing Bookmarks
-- **Edit**: Hover over a bookmark and click the ✏️ icon
+- **Edit**: Hover over a bookmark and click the edit icon
   - Update any bookmark fields
   - Move to a different bucket or category using the dropdown selectors
-- **Delete**: Hover over a bookmark and click the 🗑️ icon
+- **Delete**: Hover over a bookmark and click the delete icon
 - **Reorder**: Click and drag a bookmark to reposition it
-  - Drop on another bookmark to place it at that position
-  - Drop in spaces between bookmarks for precise placement
-- **Change View**: Use the view mode buttons (☰ List, ⊞ Grid, ▦ Card) to switch layouts
-
-### Managing Buckets & Categories
-- **Rename Bucket**: Hover over a bucket and click the ✏️ icon, then type the new name
-- **Rename Category**: Hover over a category and click the ✏️ icon, then type the new name
-- **Delete Bucket**: Hover over the bucket and click the × button
-- **Delete Category**: Hover over the category and click the × button
+- **Change View**: Use the view mode buttons (List, Grid, Card) to switch layouts
 
 ### Import & Export
-- **Export Data**: Click the "📥 Export" button in the header to download all your data as a JSON file
-- **Import JSON**: Click the "📤 Import JSON" button and select a previously exported JSON file
-  - Warning: Import will replace all existing data (you'll be asked to confirm)
-- **Import Chrome Bookmarks**: Click the "🌐 Import Chrome" button to import bookmarks from Chrome
+- **Export Data**: Click the "Export" button to download all your data as a JSON file
+- **Import JSON**: Click the "Import JSON" button and select a previously exported JSON file
+- **Import Chrome Bookmarks**: Click the "Import Chrome" button to import bookmarks from Chrome
   - First, export your Chrome bookmarks (Chrome menu → Bookmarks → Bookmark Manager → Export bookmarks)
   - Select which bucket you want to import into
   - Chrome folders will be imported as categories
-  - Imports are additive (won't replace existing bookmarks)
 
 ## Data Storage
 
-All data is stored locally in your browser's LocalStorage. This means:
-- ✅ No server required for data storage
-- ✅ Fast, instant access
-- ✅ Privacy - your data never leaves your browser
-- ⚠️ Data is tied to your browser/domain
-- ⚠️ Clearing browser data will delete bookmarks
+Data is stored in two places:
 
-To backup your data, you can export the LocalStorage key `bookmarks-app-data` from your browser's developer tools.
+1. **LocalStorage** (always): For offline access and instant loading
+2. **Cloud Firestore** (when signed in): For backup and sync across devices
+
+Privacy: Your data is associated with your Google account and secured by Firebase security rules.
 
 ## Browser Compatibility
 
@@ -313,6 +373,20 @@ Tested on:
 - Safari 14+
 - Edge 90+
 
+## Cost Estimation
+
+With the Firebase Blaze plan, you get generous free tier limits:
+
+| Service | Free Tier | Expected Usage |
+|---------|-----------|----------------|
+| Authentication | Unlimited | Free |
+| Firestore Reads | 50K/day | ~100-500/day |
+| Firestore Writes | 20K/day | ~10-50/day |
+| Cloud Functions | 2M/month | ~100/month |
+| Hosting | 10GB/month | ~100MB/month |
+
+**Expected cost for personal use: $0/month**
+
 ## License
 
 MIT
@@ -320,4 +394,3 @@ MIT
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
-

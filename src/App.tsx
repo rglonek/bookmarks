@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { AppData, Bucket, Category, Bookmark } from './types';
 import { storage, createBucket, createCategory, createBookmark } from './storage';
 import { extractMetadata, auth, serverData } from './api';
+import { User } from 'firebase/auth';
 
 type ViewMode = 'card' | 'grid' | 'list';
 
@@ -27,11 +28,10 @@ function App() {
   const [showChromeImportModal, setShowChromeImportModal] = useState(false);
   const [chromeImportBucket, setChromeImportBucket] = useState<string>('');
   
-  // Authentication state
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [authToken, setAuthToken] = useState<string | null>(null);
-  const [username, setUsername] = useState<string | null>(null);
-  const [showLoginModal, setShowLoginModal] = useState(false);
+  // Firebase Authentication state
+  const [user, setUser] = useState<User | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState<string | null>(null);
   
   // Sync state
   const [serverLastModified, setServerLastModified] = useState<string | null>(null);
@@ -48,7 +48,7 @@ function App() {
 
   // Merge function - combines local and server data intelligently
   // Handles soft deletes: if either side has deleted=true, the merged result is deleted
-  const mergeData = useCallback((localData: AppData, serverData: AppData): AppData => {
+  const mergeData = useCallback((localData: AppData, serverDataObj: AppData): AppData => {
     // Create maps for quick lookup
     const mergedBuckets = new Map<string, Bucket>();
     
@@ -58,7 +58,7 @@ function App() {
     });
     
     // Then merge in server buckets
-    serverData.buckets.forEach(serverBucket => {
+    serverDataObj.buckets.forEach(serverBucket => {
       if (mergedBuckets.has(serverBucket.id)) {
         // Bucket exists in both - merge categories
         const localBucket = mergedBuckets.get(serverBucket.id)!;
@@ -153,15 +153,15 @@ function App() {
   
   // Sync with server - fetch and merge
   const syncWithServer = useCallback(async () => {
-    if (!isAuthenticated || !authToken || isSyncingRef.current) return;
+    if (!user || isSyncingRef.current) return;
     
     isSyncingRef.current = true;
     try {
-      const result = await serverData.check(authToken);
+      const result = await serverData.check(user.uid);
       
       if (!result.error && result.lastModified !== serverLastModified) {
         // Server has changes, fetch and merge
-        const loadResult = await serverData.load(authToken);
+        const loadResult = await serverData.load(user.uid);
         
         if (loadResult.data && !loadResult.error) {
           setData(currentData => {
@@ -183,61 +183,60 @@ function App() {
     } finally {
       isSyncingRef.current = false;
     }
-  }, [isAuthenticated, authToken, serverLastModified, mergeData]);
+  }, [user, serverLastModified, mergeData]);
   
   // Manual refresh
   const handleRefresh = () => {
     syncWithServer();
   };
 
-  // Check for existing session on mount
+  // Firebase Auth state listener
   useEffect(() => {
-    const token = localStorage.getItem('authToken');
-    if (token) {
-      auth.checkSession(token).then(result => {
-        if (result.username && !result.error) {
-          setAuthToken(token);
-          setUsername(result.username);
-          setIsAuthenticated(true);
-          // Load data from server and merge with local
-          const localData = storage.load();
-          serverData.load(token).then(serverResult => {
-            if (serverResult.data && !serverResult.error) {
-              // Merge server and local data
-              const merged = mergeData(localData, serverResult.data);
-              setData(merged);
-              setServerLastModified(serverResult.lastModified || null);
-              storage.save(merged); // Save merged data locally
-            } else {
-              // Fallback to local storage
-              setData(localData);
-            }
-            setIsLoaded(true);
-            const finalData = serverResult.data ? mergeData(localData, serverResult.data) : localData;
-            if (finalData.buckets.length > 0 && !selectedBucket) {
-              setSelectedBucket(finalData.buckets[0].id);
-            }
-          });
+    const unsubscribe = auth.onAuthStateChanged(async (firebaseUser) => {
+      setUser(firebaseUser);
+      setIsAuthLoading(false);
+      
+      if (firebaseUser) {
+        // User is signed in - load and merge data
+        const localData = storage.load();
+        const serverResult = await serverData.load(firebaseUser.uid);
+        
+        if (serverResult.data && !serverResult.error) {
+          // Merge server and local data
+          const merged = mergeData(localData, serverResult.data);
+          setData(merged);
+          setServerLastModified(serverResult.lastModified || null);
+          storage.save(merged); // Save merged data locally
         } else {
-          // Token invalid, load from localStorage
-          localStorage.removeItem('authToken');
-          const loadedData = storage.load();
-          setData(loadedData);
-          setIsLoaded(true);
-          if (loadedData.buckets.length > 0 && !selectedBucket) {
-            setSelectedBucket(loadedData.buckets[0].id);
+          // Fallback to local storage
+          setData(localData);
+        }
+        setIsLoaded(true);
+        
+        // Select first bucket if none selected
+        const finalData = serverResult.data ? mergeData(localData, serverResult.data) : localData;
+        if (finalData.buckets.length > 0) {
+          const activeBuckets = finalData.buckets.filter(b => !b.deleted);
+          if (activeBuckets.length > 0) {
+            setSelectedBucket(activeBuckets[0].id);
           }
         }
-      });
-    } else {
-      // No token, load from localStorage
-      const loadedData = storage.load();
-      setData(loadedData);
-      setIsLoaded(true);
-      if (loadedData.buckets.length > 0 && !selectedBucket) {
-        setSelectedBucket(loadedData.buckets[0].id);
+      } else {
+        // User is signed out - load from local storage only
+        const loadedData = storage.load();
+        setData(loadedData);
+        setIsLoaded(true);
+        
+        if (loadedData.buckets.length > 0) {
+          const activeBuckets = loadedData.buckets.filter(b => !b.deleted);
+          if (activeBuckets.length > 0) {
+            setSelectedBucket(activeBuckets[0].id);
+          }
+        }
       }
-    }
+    });
+
+    return () => unsubscribe();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -249,14 +248,14 @@ function App() {
     storage.save(data);
     
     // Also save to server if authenticated and online
-    if (!isAuthenticated || !authToken || isSyncingRef.current || !isOnline) return;
+    if (!user || isSyncingRef.current || !isOnline) return;
     
     // Debounce server saves to avoid too many requests
     const timeoutId = setTimeout(async () => {
       if (isSyncingRef.current) return; // Check again after timeout
       
       try {
-        const saveResult = await serverData.save(authToken, data);
+        const saveResult = await serverData.save(user.uid, data);
         if (!saveResult.error && saveResult.lastModified) {
           setServerLastModified(saveResult.lastModified);
           setServerReachable(true); // Server save succeeded
@@ -272,7 +271,7 @@ function App() {
     }, 500); // Wait 500ms before saving to server
     
     return () => clearTimeout(timeoutId);
-  }, [data, isLoaded, isAuthenticated, authToken, isOnline]);
+  }, [data, isLoaded, user, isOnline]);
 
   // Cleanup auto-scroll interval on unmount
   useEffect(() => {
@@ -285,7 +284,7 @@ function App() {
   
   // Window focus/blur handlers for periodic sync
   useEffect(() => {
-    if (!isAuthenticated) return;
+    if (!user) return;
     
     const handleFocus = () => {
       // Immediately sync when window gains focus
@@ -325,7 +324,7 @@ function App() {
         clearInterval(syncIntervalRef.current);
       }
     };
-  }, [isAuthenticated, authToken, syncWithServer]);
+  }, [user, syncWithServer]);
 
   // Get all unique tags (excluding deleted bookmarks)
   const allTags = useMemo(() => {
@@ -600,7 +599,7 @@ function App() {
       setIsOnline(true);
       setServerReachable(true);
       // Try to sync when coming back online
-      if (isAuthenticated && authToken) {
+      if (user) {
         syncWithServer();
       }
     };
@@ -617,7 +616,7 @@ function App() {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [isAuthenticated, authToken, syncWithServer]);
+  }, [user, syncWithServer]);
 
   const handleDragStart = (e: React.DragEvent, bucketId: string, categoryId: string, bookmarkId: string) => {
     setDraggedBookmark({ bucketId, categoryId, bookmarkId });
@@ -788,53 +787,17 @@ function App() {
     scrollDirectionRef.current = null;
   };
 
-  const handleLogin = async (username: string, password: string, isRegister: boolean) => {
-    if (isRegister) {
-      const result = await auth.register(username, password);
-      if (!result.success) {
-        return { success: false, error: result.error };
-      }
+  const handleGoogleSignIn = async () => {
+    setAuthError(null);
+    const result = await auth.signInWithGoogle();
+    if (!result.success) {
+      setAuthError(result.error || 'Sign-in failed');
     }
-    
-    const result = await auth.login(username, password);
-    if (result.success && result.token) {
-      setAuthToken(result.token);
-      setUsername(result.username || username);
-      setIsAuthenticated(true);
-      localStorage.setItem('authToken', result.token);
-      
-      // Load server data, merge with local, then save merged result
-      const localData = data;
-      const serverResult = await serverData.load(result.token);
-      
-      if (serverResult.data && !serverResult.error) {
-        // Merge server data with local data
-        const merged = mergeData(localData, serverResult.data);
-        setData(merged);
-        setServerLastModified(serverResult.lastModified || null);
-        storage.save(merged);
-        
-        // Save merged data back to server
-        await serverData.save(result.token, merged);
-      } else {
-        // No server data or error loading, just save local data
-        await serverData.save(result.token, data);
-      }
-      
-      return { success: true };
-    }
-    
-    return { success: false, error: result.error };
   };
 
-  const handleLogout = async () => {
-    if (authToken) {
-      await auth.logout(authToken);
-    }
-    setAuthToken(null);
-    setUsername(null);
-    setIsAuthenticated(false);
-    localStorage.removeItem('authToken');
+  const handleSignOut = async () => {
+    await auth.signOut();
+    setServerLastModified(null);
   };
 
   const exportData = () => {
@@ -1049,17 +1012,29 @@ function App() {
   
   const currentCategory = sortedCategories.find(c => c.id === selectedCategory);
 
+  // Show loading state while checking auth
+  if (isAuthLoading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto mb-4"></div>
+          <p className="text-gray-600">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
       {/* Connection Status Banner */}
       {!isOnline && (
         <div className="bg-yellow-500 text-white px-4 py-2 text-center text-sm font-medium">
-          ⚠️ No Internet Connection - Changes saved locally only
+          No Internet Connection - Changes saved locally only
         </div>
       )}
-      {isOnline && !serverReachable && isAuthenticated && (
+      {isOnline && !serverReachable && user && (
         <div className="bg-orange-500 text-white px-4 py-2 text-center text-sm font-medium">
-          ⚠️ Server Unreachable - Changes saved locally, will sync when server is available
+          Server Unreachable - Changes saved locally, will sync when server is available
         </div>
       )}
       
@@ -1067,7 +1042,7 @@ function App() {
       <header className="bg-white shadow-md">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-            <h1 className="text-2xl sm:text-3xl font-bold text-indigo-600">📚 Bookmarks Manager</h1>
+            <h1 className="text-2xl sm:text-3xl font-bold text-indigo-600">Bookmarks Manager</h1>
             <div className="flex flex-wrap gap-2 w-full sm:w-auto">
               <button
                 onClick={() => setShowBucketModal(true)}
@@ -1079,10 +1054,10 @@ function App() {
                 onClick={exportData}
                 className="flex-1 sm:flex-none bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition text-sm"
               >
-                📥 Export
+                Export
               </button>
               <label className="flex-1 sm:flex-none bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition text-sm cursor-pointer text-center">
-                📤 Import JSON
+                Import JSON
                 <input
                   type="file"
                   accept=".json"
@@ -1094,9 +1069,9 @@ function App() {
                 onClick={() => setShowChromeImportModal(true)}
                 className="flex-1 sm:flex-none bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700 transition text-sm"
               >
-                🌐 Import Chrome
+                Import Chrome
               </button>
-              {isAuthenticated ? (
+              {user ? (
                 <>
                   <button
                     onClick={handleRefresh}
@@ -1104,29 +1079,43 @@ function App() {
                     title="Sync with server"
                     disabled={!isOnline || !serverReachable}
                   >
-                    🔄 Refresh
-                    {!isOnline || !serverReachable ? ' (Offline)' : ''}
+                    Refresh
+                    {(!isOnline || !serverReachable) && ' (Offline)'}
                   </button>
                   <button
-                    onClick={handleLogout}
-                    className="flex-1 sm:flex-none bg-gray-600 text-white px-4 py-2 rounded-lg hover:bg-gray-700 transition text-sm"
-                    title={`Logged in as ${username}`}
+                    onClick={handleSignOut}
+                    className="flex-1 sm:flex-none bg-gray-600 text-white px-4 py-2 rounded-lg hover:bg-gray-700 transition text-sm flex items-center justify-center gap-2"
+                    title={`Signed in as ${user.displayName || user.email}`}
                   >
-                    👤 Logout ({username})
-                    {isOnline && serverReachable && <span className="ml-1 text-green-300">●</span>}
-                    {(!isOnline || !serverReachable) && <span className="ml-1 text-red-300">●</span>}
+                    {user.photoURL && (
+                      <img src={user.photoURL} alt="" className="w-5 h-5 rounded-full" />
+                    )}
+                    <span className="truncate max-w-[100px]">{user.displayName || user.email}</span>
+                    {isOnline && serverReachable && <span className="text-green-300">●</span>}
+                    {(!isOnline || !serverReachable) && <span className="text-red-300">●</span>}
                   </button>
                 </>
               ) : (
                 <button
-                  onClick={() => setShowLoginModal(true)}
-                  className="flex-1 sm:flex-none bg-gray-600 text-white px-4 py-2 rounded-lg hover:bg-gray-700 transition text-sm"
+                  onClick={handleGoogleSignIn}
+                  className="flex-1 sm:flex-none bg-white text-gray-700 border border-gray-300 px-4 py-2 rounded-lg hover:bg-gray-50 transition text-sm flex items-center justify-center gap-2"
                 >
-                  🔒 Login
+                  <svg className="w-5 h-5" viewBox="0 0 24 24">
+                    <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                    <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                    <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                    <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                  </svg>
+                  Sign in with Google
                 </button>
               )}
             </div>
           </div>
+          {authError && (
+            <div className="mt-2 bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded-lg text-sm">
+              {authError}
+            </div>
+          )}
         </div>
       </header>
 
@@ -1525,13 +1514,6 @@ function App() {
       )}
 
       {/* Modals */}
-      {showLoginModal && (
-        <LoginModal
-          onClose={() => setShowLoginModal(false)}
-          onLogin={handleLogin}
-        />
-      )}
-
       {showBucketModal && (
         <Modal onClose={() => setShowBucketModal(false)}>
           <h2 className="text-xl font-semibold mb-4">Create New Bucket</h2>
@@ -1619,7 +1601,12 @@ function App() {
           currentCategoryId={currentCategory.id}
           allBuckets={sortedBuckets}
           isExtracting={isExtracting}
+          isAuthenticated={!!user}
           onExtract={async (url) => {
+            if (!user) {
+              // If not authenticated, return empty (metadata extraction requires auth)
+              return { title: '', description: '' };
+            }
             setIsExtracting(true);
             const metadata = await extractMetadata(url);
             setIsExtracting(false);
@@ -1690,8 +1677,8 @@ function App() {
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm">
               <p className="font-semibold mb-2">How to export from Chrome:</p>
               <ol className="list-decimal ml-4 space-y-1">
-                <li>Open Chrome and click the three dots (⋮) menu</li>
-                <li>Go to <strong>Bookmarks → Bookmark Manager</strong></li>
+                <li>Open Chrome and click the three dots menu</li>
+                <li>Go to <strong>Bookmarks - Bookmark Manager</strong></li>
                 <li>Click the three dots in the Bookmark Manager</li>
                 <li>Select <strong>Export bookmarks</strong></li>
                 <li>Save the HTML file to your computer</li>
@@ -1937,6 +1924,7 @@ function BookmarkModal({
   currentCategoryId,
   allBuckets,
   isExtracting,
+  isAuthenticated,
   onExtract,
   onSave,
   onClose
@@ -1946,6 +1934,7 @@ function BookmarkModal({
   currentCategoryId: string;
   allBuckets: Bucket[];
   isExtracting: boolean;
+  isAuthenticated: boolean;
   onExtract: (url: string) => Promise<{ title: string; description: string }>;
   onSave: (data: Omit<Bookmark, 'id' | 'createdAt' | 'updatedAt'>, bucketId: string, categoryId: string) => void;
   onClose: () => void;
@@ -1967,7 +1956,7 @@ function BookmarkModal({
   const handleUrlChange = async (url: string) => {
     setFormData(prev => ({ ...prev, url }));
 
-    if (url.trim() && url.startsWith('http')) {
+    if (url.trim() && url.startsWith('http') && isAuthenticated) {
       const metadata = await onExtract(url);
       if (metadata.title || metadata.description) {
         setFormData(prev => ({
@@ -2012,6 +2001,9 @@ function BookmarkModal({
               />
               {isExtracting && (
                 <p className="text-sm text-indigo-600 mt-1">Extracting metadata...</p>
+              )}
+              {!isAuthenticated && (
+                <p className="text-sm text-gray-500 mt-1">Sign in to auto-fill title and description</p>
               )}
             </div>
 
@@ -2125,118 +2117,4 @@ function BookmarkModal({
   );
 }
 
-// Login Modal Component
-function LoginModal({
-  onClose,
-  onLogin
-}: {
-  onClose: () => void;
-  onLogin: (username: string, password: string, isRegister: boolean) => Promise<{ success: boolean; error?: string }>;
-}) {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [isRegister, setIsRegister] = useState(false);
-  const [error, setError] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError('');
-    setIsLoading(true);
-
-    const result = await onLogin(username, password, isRegister);
-    
-    setIsLoading(false);
-    
-    if (result.success) {
-      onClose();
-    } else {
-      setError(result.error || 'Authentication failed');
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-      <div className="bg-white rounded-lg p-6 max-w-md w-full">
-        <h2 className="text-xl font-semibold mb-4">
-          {isRegister ? 'Create Account' : 'Login'}
-        </h2>
-        <form onSubmit={handleSubmit}>
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium mb-1">Username *</label>
-              <input
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                placeholder="Enter username"
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                required
-                disabled={isLoading}
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium mb-1">Password *</label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter password"
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                required
-                disabled={isLoading}
-              />
-            </div>
-
-            {error && (
-              <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded-lg text-sm">
-                {error}
-              </div>
-            )}
-
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-gray-700">
-              <p className="font-semibold mb-1">ℹ️ Server-Side Storage</p>
-              <p>When logged in, your bookmarks will be stored both locally and on the server, accessible from any device.</p>
-            </div>
-          </div>
-
-          <div className="flex gap-2 mt-6">
-            <button
-              type="submit"
-              className="flex-1 bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition disabled:bg-gray-400 disabled:cursor-not-allowed"
-              disabled={isLoading}
-            >
-              {isLoading ? 'Please wait...' : (isRegister ? 'Register & Login' : 'Login')}
-            </button>
-            <button
-              type="button"
-              onClick={onClose}
-              className="flex-1 bg-gray-200 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-300 transition"
-              disabled={isLoading}
-            >
-              Cancel
-            </button>
-          </div>
-
-          <div className="mt-4 text-center">
-            <button
-              type="button"
-              onClick={() => {
-                setIsRegister(!isRegister);
-                setError('');
-              }}
-              className="text-indigo-600 hover:text-indigo-700 text-sm"
-              disabled={isLoading}
-            >
-              {isRegister ? 'Already have an account? Login' : 'Need an account? Register'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
 export default App;
-

@@ -1,166 +1,169 @@
 import { AppData } from './types';
+import { auth as firebaseAuth, db, functions, googleProvider } from './firebase';
+import { 
+  signInWithPopup, 
+  signOut, 
+  onAuthStateChanged,
+  User
+} from 'firebase/auth';
+import { 
+  doc, 
+  getDoc, 
+  setDoc, 
+  serverTimestamp,
+  Timestamp
+} from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions';
 
 export interface MetadataResponse {
   title: string;
   description: string;
 }
 
+// Cloud Function for metadata extraction
+const extractMetadataFunction = httpsCallable<{ url: string }, MetadataResponse>(
+  functions, 
+  'extractMetadata'
+);
+
 export const extractMetadata = async (url: string): Promise<MetadataResponse> => {
   try {
-    const response = await fetch('/api/extract-metadata', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ url })
-    });
-
-    if (!response.ok) {
-      throw new Error('Failed to extract metadata');
-    }
-
-    return await response.json();
+    const result = await extractMetadataFunction({ url });
+    return result.data;
   } catch (error) {
     console.error('Error extracting metadata:', error);
     return { title: '', description: '' };
   }
 };
 
-// Authentication API
+// Firebase Authentication API
 export const auth = {
-  async register(username: string, password: string): Promise<{ success: boolean; error?: string }> {
-    try {
-      const response = await fetch('/api/auth/register', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ username, password })
-      });
-
-      const data = await response.json();
-      
-      if (!response.ok) {
-        return { success: false, error: data.error };
-      }
-
-      return { success: true };
-    } catch (_error) {
-      return { success: false, error: 'Network error' };
-    }
+  // Get current user
+  getCurrentUser(): User | null {
+    return firebaseAuth.currentUser;
   },
 
-  async login(username: string, password: string): Promise<{ success: boolean; token?: string; username?: string; error?: string }> {
-    try {
-      const response = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ username, password })
-      });
-
-      const data = await response.json();
-      
-      if (!response.ok) {
-        return { success: false, error: data.error };
-      }
-
-      return { success: true, token: data.token, username: data.username };
-    } catch (_error) {
-      return { success: false, error: 'Network error' };
-    }
+  // Subscribe to auth state changes
+  onAuthStateChanged(callback: (user: User | null) => void): () => void {
+    return onAuthStateChanged(firebaseAuth, callback);
   },
 
-  async logout(token: string): Promise<void> {
+  // Sign in with Google
+  async signInWithGoogle(): Promise<{ success: boolean; user?: User; error?: string }> {
     try {
-      await fetch('/api/auth/logout', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
+      const result = await signInWithPopup(firebaseAuth, googleProvider);
+      return { success: true, user: result.user };
     } catch (error) {
-      console.error('Logout error:', error);
+      console.error('Google sign-in error:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Sign-in failed';
+      return { success: false, error: errorMessage };
     }
   },
 
-  async checkSession(token: string): Promise<{ username?: string; error?: string }> {
+  // Sign out
+  async signOut(): Promise<void> {
     try {
-      const response = await fetch('/api/auth/session', {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-
-      if (!response.ok) {
-        return { error: 'Not authenticated' };
-      }
-
-      return await response.json();
-    } catch (_error) {
-      return { error: 'Network error' };
+      await signOut(firebaseAuth);
+    } catch (error) {
+      console.error('Sign-out error:', error);
     }
+  },
+
+  // Legacy methods for backwards compatibility during migration
+  // These can be removed after full migration
+  async register(_username: string, _password: string): Promise<{ success: boolean; error?: string }> {
+    // Not used with Google Sign-In
+    return { success: false, error: 'Please use Google Sign-In' };
+  },
+
+  async login(_username: string, _password: string): Promise<{ success: boolean; token?: string; username?: string; error?: string }> {
+    // Not used with Google Sign-In
+    return { success: false, error: 'Please use Google Sign-In' };
+  },
+
+  async logout(_token: string): Promise<void> {
+    await this.signOut();
+  },
+
+  async checkSession(_token: string): Promise<{ username?: string; error?: string }> {
+    const user = firebaseAuth.currentUser;
+    if (user) {
+      return { username: user.displayName || user.email || 'User' };
+    }
+    return { error: 'Not authenticated' };
   }
 };
 
-// Server data storage API
+// Firestore data storage API
 export const serverData = {
-  async load(token: string): Promise<{ data?: AppData; lastModified?: string | null; error?: string }> {
+  // Load user data from Firestore
+  async load(userId: string): Promise<{ data?: AppData; lastModified?: string | null; error?: string }> {
     try {
-      const response = await fetch('/api/data', {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
+      const docRef = doc(db, 'users', userId, 'data', 'bookmarks');
+      const docSnap = await getDoc(docRef);
 
-      if (!response.ok) {
-        return { error: 'Failed to load data' };
+      if (docSnap.exists()) {
+        const docData = docSnap.data();
+        return {
+          data: docData.data as AppData,
+          lastModified: docData.lastModified instanceof Timestamp 
+            ? docData.lastModified.toDate().toISOString()
+            : docData.lastModified || null
+        };
       }
 
-      return await response.json();
-    } catch (_error) {
-      return { error: 'Network error' };
+      // No data exists yet - return empty data
+      return { 
+        data: { buckets: [] }, 
+        lastModified: null 
+      };
+    } catch (error) {
+      console.error('Error loading data from Firestore:', error);
+      return { error: 'Failed to load data' };
     }
   },
 
-  async save(token: string, data: AppData): Promise<{ success: boolean; lastModified?: string; error?: string }> {
+  // Save user data to Firestore
+  async save(userId: string, data: AppData): Promise<{ success: boolean; lastModified?: string; error?: string }> {
     try {
-      const response = await fetch('/api/data', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({ data })
+      const docRef = doc(db, 'users', userId, 'data', 'bookmarks');
+      const now = new Date().toISOString();
+      
+      await setDoc(docRef, {
+        data,
+        lastModified: serverTimestamp(),
+        updatedAt: now
       });
 
-      if (!response.ok) {
-        return { success: false, error: 'Failed to save data' };
-      }
-
-      return await response.json();
-    } catch (_error) {
-      return { success: false, error: 'Network error' };
+      return { 
+        success: true, 
+        lastModified: now 
+      };
+    } catch (error) {
+      console.error('Error saving data to Firestore:', error);
+      return { success: false, error: 'Failed to save data' };
     }
   },
 
-  async check(token: string): Promise<{ lastModified?: string | null; error?: string }> {
+  // Check last modified timestamp
+  async check(userId: string): Promise<{ lastModified?: string | null; error?: string }> {
     try {
-      const response = await fetch('/api/data/check', {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
+      const docRef = doc(db, 'users', userId, 'data', 'bookmarks');
+      const docSnap = await getDoc(docRef);
 
-      if (!response.ok) {
-        return { error: 'Failed to check data' };
+      if (docSnap.exists()) {
+        const docData = docSnap.data();
+        return {
+          lastModified: docData.lastModified instanceof Timestamp 
+            ? docData.lastModified.toDate().toISOString()
+            : docData.lastModified || null
+        };
       }
 
-      return await response.json();
-    } catch (_error) {
-      return { error: 'Network error' };
+      return { lastModified: null };
+    } catch (error) {
+      console.error('Error checking data:', error);
+      return { error: 'Failed to check data' };
     }
   }
 };
-

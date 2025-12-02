@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import type { AppData, Bookmark } from '../types';
+import type { AppData, Bookmark, Category } from '../types';
 
 // Test the soft delete (tombstone) functionality
 describe('Soft Delete / Tombstones', () => {

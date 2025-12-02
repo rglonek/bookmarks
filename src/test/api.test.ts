@@ -1,243 +1,118 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { auth, serverData } from '../api';
-import type { AppData } from '../types';
+import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest';
 
-// Mock fetch
-const mockFetch = vi.fn();
-globalThis.fetch = mockFetch as typeof fetch;
+// Mock Firebase modules before any imports
+beforeAll(() => {
+  vi.mock('firebase/app', () => ({
+    initializeApp: vi.fn(() => ({}))
+  }));
 
-describe('Auth API', () => {
+  vi.mock('firebase/auth', () => {
+    const mockGoogleAuthProvider = vi.fn();
+    mockGoogleAuthProvider.prototype.setCustomParameters = vi.fn();
+    
+    return {
+      getAuth: vi.fn(() => ({
+        currentUser: null
+      })),
+      GoogleAuthProvider: mockGoogleAuthProvider,
+      signInWithPopup: vi.fn(),
+      signOut: vi.fn(),
+      onAuthStateChanged: vi.fn((_auth, _callback) => {
+        // Return unsubscribe function
+        return () => {};
+      })
+    };
+  });
+
+  vi.mock('firebase/firestore', () => ({
+    getFirestore: vi.fn(() => ({})),
+    doc: vi.fn(),
+    getDoc: vi.fn(() => Promise.resolve({ exists: () => false })),
+    setDoc: vi.fn(() => Promise.resolve()),
+    serverTimestamp: vi.fn(),
+    Timestamp: {
+      fromDate: vi.fn()
+    }
+  }));
+
+  vi.mock('firebase/functions', () => ({
+    getFunctions: vi.fn(() => ({})),
+    httpsCallable: vi.fn(() => vi.fn(() => Promise.resolve({ data: { title: '', description: '' } })))
+  }));
+});
+
+describe('Firebase API Module', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  describe('register', () => {
-    it('should successfully register a new user', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ success: true, message: 'User registered successfully' })
-      });
-
-      const result = await auth.register('testuser', 'password123');
+  describe('Module Exports', () => {
+    it('should export auth object with expected methods', async () => {
+      const { auth } = await import('../api');
       
-      expect(result.success).toBe(true);
-      expect(mockFetch).toHaveBeenCalledWith('/api/auth/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: 'testuser', password: 'password123' })
-      });
+      expect(auth).toBeDefined();
+      expect(typeof auth.signInWithGoogle).toBe('function');
+      expect(typeof auth.signOut).toBe('function');
+      expect(typeof auth.onAuthStateChanged).toBe('function');
+      expect(typeof auth.getCurrentUser).toBe('function');
     });
 
-    it('should handle registration error', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: false,
-        json: async () => ({ error: 'Username already exists' })
-      });
-
-      const result = await auth.register('existinguser', 'password123');
+    it('should export serverData object with expected methods', async () => {
+      const { serverData } = await import('../api');
       
-      expect(result.success).toBe(false);
-      expect(result.error).toBe('Username already exists');
+      expect(serverData).toBeDefined();
+      expect(typeof serverData.load).toBe('function');
+      expect(typeof serverData.save).toBe('function');
+      expect(typeof serverData.check).toBe('function');
     });
 
-    it('should handle network error', async () => {
-      mockFetch.mockRejectedValueOnce(new Error('Network error'));
-
-      const result = await auth.register('testuser', 'password123');
+    it('should export extractMetadata function', async () => {
+      const { extractMetadata } = await import('../api');
       
-      expect(result.success).toBe(false);
-      expect(result.error).toBe('Network error');
+      expect(typeof extractMetadata).toBe('function');
     });
   });
 
-  describe('login', () => {
-    it('should successfully login and return token', async () => {
-      const mockToken = 'abc123token';
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ token: mockToken, username: 'testuser' })
-      });
-
-      const result = await auth.login('testuser', 'password123');
+  describe('Auth Methods', () => {
+    it('should have legacy methods for backwards compatibility', async () => {
+      const { auth } = await import('../api');
       
-      expect(result.success).toBe(true);
-      expect(result.token).toBe(mockToken);
-      expect(result.username).toBe('testuser');
+      // These legacy methods exist but redirect to Google Sign-In
+      expect(typeof auth.register).toBe('function');
+      expect(typeof auth.login).toBe('function');
+      expect(typeof auth.logout).toBe('function');
+      expect(typeof auth.checkSession).toBe('function');
     });
 
-    it('should handle invalid credentials', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: false,
-        json: async () => ({ error: 'Invalid credentials' })
-      });
-
-      const result = await auth.login('wronguser', 'wrongpass');
+    it('legacy register should return error directing to Google Sign-In', async () => {
+      const { auth } = await import('../api');
       
+      const result = await auth.register('test', 'test');
       expect(result.success).toBe(false);
-      expect(result.error).toBe('Invalid credentials');
-    });
-  });
-
-  describe('logout', () => {
-    it('should call logout endpoint with token', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true
-      });
-
-      await auth.logout('test-token');
-      
-      expect(mockFetch).toHaveBeenCalledWith('/api/auth/logout', {
-        method: 'POST',
-        headers: { 'Authorization': 'Bearer test-token' }
-      });
-    });
-  });
-
-  describe('checkSession', () => {
-    it('should return username for valid session', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ username: 'testuser' })
-      });
-
-      const result = await auth.checkSession('valid-token');
-      
-      expect(result.username).toBe('testuser');
-      expect(result.error).toBeUndefined();
+      expect(result.error).toContain('Google Sign-In');
     });
 
-    it('should return error for invalid session', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: false,
-        json: async () => ({ error: 'Not authenticated' })
-      });
-
-      const result = await auth.checkSession('invalid-token');
+    it('legacy login should return error directing to Google Sign-In', async () => {
+      const { auth } = await import('../api');
       
-      expect(result.error).toBe('Not authenticated');
+      const result = await auth.login('test', 'test');
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Google Sign-In');
     });
   });
 });
 
-describe('Server Data API', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  describe('load', () => {
-    it('should load data from server', async () => {
-      const mockData: AppData = {
-        buckets: [
-          {
-            id: 'bucket1',
-            name: 'Work',
-            categories: []
-          }
-        ]
-      };
-
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ 
-          data: mockData,
-          lastModified: '2024-01-01T12:00:00Z'
-        })
-      });
-
-      const result = await serverData.load('test-token');
-      
-      expect(result.data).toEqual(mockData);
-      expect(result.lastModified).toBe('2024-01-01T12:00:00Z');
-      expect(mockFetch).toHaveBeenCalledWith('/api/data', {
-        headers: { 'Authorization': 'Bearer test-token' }
-      });
-    });
-
-    it('should handle load error', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: false
-      });
-
-      const result = await serverData.load('test-token');
-      
-      expect(result.error).toBe('Failed to load data');
-    });
-  });
-
-  describe('save', () => {
-    it('should save data to server', async () => {
-      const testData: AppData = {
-        buckets: [
-          {
-            id: 'bucket1',
-            name: 'Personal',
-            categories: []
-          }
-        ]
-      };
-
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ 
-          success: true,
-          lastModified: '2024-01-01T13:00:00Z'
-        })
-      });
-
-      const result = await serverData.save('test-token', testData);
-      
-      expect(result.success).toBe(true);
-      expect(result.lastModified).toBe('2024-01-01T13:00:00Z');
-      expect(mockFetch).toHaveBeenCalledWith('/api/data', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer test-token'
-        },
-        body: JSON.stringify({ data: testData })
-      });
-    });
-
-    it('should handle save error', async () => {
-      const testData: AppData = { buckets: [] };
-      
-      mockFetch.mockResolvedValueOnce({
-        ok: false
-      });
-
-      const result = await serverData.save('test-token', testData);
-      
-      expect(result.success).toBe(false);
-      expect(result.error).toBe('Failed to save data');
-    });
-  });
-
-  describe('check', () => {
-    it('should return last modified timestamp', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ 
-          lastModified: '2024-01-01T14:00:00Z'
-        })
-      });
-
-      const result = await serverData.check('test-token');
-      
-      expect(result.lastModified).toBe('2024-01-01T14:00:00Z');
-      expect(mockFetch).toHaveBeenCalledWith('/api/data/check', {
-        headers: { 'Authorization': 'Bearer test-token' }
-      });
-    });
-
-    it('should handle check error', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: false
-      });
-
-      const result = await serverData.check('test-token');
-      
-      expect(result.error).toBe('Failed to check data');
-    });
+describe('MetadataResponse Type', () => {
+  it('should define correct metadata response structure', async () => {
+    const { extractMetadata } = await import('../api');
+    
+    // With mocked httpsCallable, this will return the mock response
+    const result = await extractMetadata('https://example.com');
+    
+    // Should return the expected structure
+    expect(result).toHaveProperty('title');
+    expect(result).toHaveProperty('description');
+    expect(typeof result.title).toBe('string');
+    expect(typeof result.description).toBe('string');
   });
 });
-

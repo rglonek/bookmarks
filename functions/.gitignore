@@ -1,0 +1,10 @@
+# Dependency directories
+node_modules/
+
+# Local Firebase emulator data
+.firebase/
+
+# Environment files
+.env
+.env.local
+
