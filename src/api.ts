@@ -129,8 +129,11 @@ export const serverData = {
       const docRef = doc(db, 'users', userId, 'data', 'bookmarks');
       const now = new Date().toISOString();
       
+      // Clean data to remove undefined values (Firestore doesn't accept undefined)
+      const cleanData = JSON.parse(JSON.stringify(data));
+      
       await setDoc(docRef, {
-        data,
+        data: cleanData,
         lastModified: serverTimestamp(),
         updatedAt: now
       });
