@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#3b82f6"/>
+      <stop offset="100%" style="stop-color:#1d4ed8"/>
+    </linearGradient>
+  </defs>
+  <!-- Background circle -->
+  <circle cx="96" cy="96" r="88" fill="url(#bgGrad)"/>
+  <!-- Bookmark icon -->
+  <path d="M56 32 h80 a8 8 0 0 1 8 8 v120 a4 4 0 0 1 -6.4 3.2 L96 132 l-41.6 31.2 A4 4 0 0 1 48 160 V40 a8 8 0 0 1 8 -8z" 
+        fill="white" 
+        opacity="0.95"/>
+  <!-- Inner fold detail -->
+  <path d="M56 32 h80 a8 8 0 0 1 8 8 v8 H48 v-8 a8 8 0 0 1 8 -8z" 
+        fill="white" 
+        opacity="0.7"/>
+</svg>
+
