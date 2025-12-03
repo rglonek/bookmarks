@@ -6,6 +6,16 @@ import { User } from 'firebase/auth';
 
 type ViewMode = 'card' | 'grid' | 'list';
 
+// Helper to open URLs in external browser (especially for PWA on iOS)
+const openExternalLink = (url: string, e?: React.MouseEvent) => {
+  if (e) {
+    e.preventDefault();
+  }
+  // Use window.open with _system or _blank to force external browser
+  // On iOS PWA, this helps open in Safari instead of in-app
+  window.open(url, '_blank', 'noopener,noreferrer');
+};
+
 function App() {
   const [data, setData] = useState<AppData>({ buckets: [] });
   const [selectedBucket, setSelectedBucket] = useState<string | null>(null);
@@ -36,6 +46,10 @@ function App() {
   const [shareError, setShareError] = useState<string | null>(null);
   const [shareSuccess, setShareSuccess] = useState<string | null>(null);
   const [isSharing, setIsSharing] = useState(false);
+  
+  // Shared URL state (when receiving link from browser share)
+  const [sharedUrl, setSharedUrl] = useState<{ url: string; title: string; text: string } | null>(null);
+  const [showAddSharedBookmarkModal, setShowAddSharedBookmarkModal] = useState(false);
   
   // Separate state for shared buckets
   const [sharedBucketsData, setSharedBucketsData] = useState<Bucket[]>([]);
@@ -391,6 +405,37 @@ function App() {
       }
     };
   }, []);
+
+  // Handle Share Target API - receive shared links from other apps
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const sharedUrlParam = urlParams.get('url');
+    const sharedTitle = urlParams.get('title') || '';
+    const sharedText = urlParams.get('text') || '';
+    
+    if (sharedUrlParam) {
+      // Extract URL from text if not provided directly (some apps put URL in text)
+      let url = sharedUrlParam;
+      if (!url && sharedText) {
+        const urlMatch = sharedText.match(/https?:\/\/[^\s]+/);
+        if (urlMatch) {
+          url = urlMatch[0];
+        }
+      }
+      
+      if (url) {
+        setSharedUrl({ 
+          url, 
+          title: sharedTitle, 
+          text: sharedText 
+        });
+        setShowAddSharedBookmarkModal(true);
+        
+        // Clean the URL to remove the share params
+        window.history.replaceState({}, document.title, '/');
+      }
+    }
+  }, []);
   
   // Window focus/blur handlers for periodic sync
   useEffect(() => {
@@ -673,8 +718,12 @@ function App() {
 
   // Helper to check if user has write permission on a bucket
   const userHasWritePermission = useCallback((bucket: Bucket): boolean => {
+    // For non-shared (personal/local) buckets, always allow write
+    // This enables offline functionality for logged-out users
+    if (!bucket.isShared) return true;
+    
+    // For shared buckets, user must be logged in and have write permission
     if (!user) return false;
-    if (!bucket.isShared) return true; // Personal buckets always have write
     
     const userOwner = bucket.owners?.find(o => o.id === user.uid);
     return userOwner?.permission === 'write';
@@ -2353,6 +2402,45 @@ function App() {
           </div>
         </Modal>
       )}
+
+      {/* Add Shared Bookmark Modal - shown when receiving URL from browser share */}
+      {showAddSharedBookmarkModal && sharedUrl && (
+        <AddSharedBookmarkModal
+          sharedUrl={sharedUrl}
+          buckets={sortedBuckets}
+          isAuthenticated={!!user}
+          onSave={(bucketId, categoryId, bookmarkData) => {
+            const isSharedBucket = sharedBucketsData.some(b => b.id === bucketId);
+            const newBookmark = createBookmark(bookmarkData);
+            
+            const updateBuckets = (buckets: Bucket[]) => buckets.map(bucket =>
+              bucket.id === bucketId
+                ? {
+                    ...bucket,
+                    categories: bucket.categories.map(category =>
+                      category.id === categoryId
+                        ? { ...category, bookmarks: [...category.bookmarks, newBookmark] }
+                        : category
+                    )
+                  }
+                : bucket
+            );
+            
+            if (isSharedBucket) {
+              setSharedBucketsData(updateBuckets);
+            } else {
+              setData(prev => ({ ...prev, buckets: updateBuckets(prev.buckets) }));
+            }
+            
+            setShowAddSharedBookmarkModal(false);
+            setSharedUrl(null);
+          }}
+          onClose={() => {
+            setShowAddSharedBookmarkModal(false);
+            setSharedUrl(null);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -2429,6 +2517,7 @@ function BookmarkCard({
               href={bookmark.url}
               target="_blank"
               rel="noopener noreferrer"
+              onClick={(e) => openExternalLink(bookmark.url, e)}
               className="text-xs text-indigo-600 hover:underline truncate block"
             >
               {bookmark.url}
@@ -2475,6 +2564,7 @@ function BookmarkCard({
           href={bookmark.url}
           target="_blank"
           rel="noopener noreferrer"
+          onClick={(e) => openExternalLink(bookmark.url, e)}
           className="text-xs text-indigo-600 hover:underline block mb-2 truncate"
         >
           {bookmark.url}
@@ -2522,6 +2612,7 @@ function BookmarkCard({
         href={bookmark.url}
         target="_blank"
         rel="noopener noreferrer"
+        onClick={(e) => openExternalLink(bookmark.url, e)}
         className="text-sm text-indigo-600 hover:underline block mb-2 truncate"
       >
         {bookmark.url}
@@ -2733,6 +2824,225 @@ function BookmarkModal({
               className="flex-1 bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition"
             >
               {bookmark ? 'Update' : 'Create'}
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex-1 bg-gray-200 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-300 transition"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// Add Shared Bookmark Modal - for receiving URLs from browser share
+function AddSharedBookmarkModal({
+  sharedUrl,
+  buckets,
+  isAuthenticated,
+  onSave,
+  onClose
+}: {
+  sharedUrl: { url: string; title: string; text: string };
+  buckets: Bucket[];
+  isAuthenticated: boolean;
+  onSave: (bucketId: string, categoryId: string, data: Omit<Bookmark, 'id' | 'createdAt' | 'updatedAt'>) => void;
+  onClose: () => void;
+}) {
+  const [selectedBucket, setSelectedBucket] = useState<string>('');
+  const [selectedCategory, setSelectedCategory] = useState<string>('');
+  const [title, setTitle] = useState(sharedUrl.title || '');
+  const [description, setDescription] = useState(sharedUrl.text || '');
+  const [tags, setTags] = useState('');
+  const [notes, setNotes] = useState('');
+
+  // Get categories for selected bucket
+  const selectedBucketData = buckets.find(b => b.id === selectedBucket);
+  const categories = selectedBucketData 
+    ? [...selectedBucketData.categories].filter(c => !c.deleted).sort((a, b) => a.name.localeCompare(b.name))
+    : [];
+
+  // Auto-select first bucket and category
+  useEffect(() => {
+    if (buckets.length > 0 && !selectedBucket) {
+      setSelectedBucket(buckets[0].id);
+    }
+  }, [buckets, selectedBucket]);
+
+  useEffect(() => {
+    if (categories.length > 0 && !selectedCategory) {
+      setSelectedCategory(categories[0].id);
+    }
+  }, [categories, selectedCategory]);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedBucket || !selectedCategory || !title.trim()) return;
+
+    onSave(selectedBucket, selectedCategory, {
+      title: title.trim(),
+      url: sharedUrl.url,
+      description: description.trim(),
+      tags: tags.split(',').map(t => t.trim()).filter(t => t),
+      notes: notes.trim()
+    });
+  };
+
+  if (!isAuthenticated) {
+    return (
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+        <div className="bg-white rounded-lg p-6 max-w-md w-full">
+          <h2 className="text-xl font-semibold mb-4">Save Bookmark</h2>
+          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 text-yellow-800 mb-4">
+            <p className="font-medium">Sign in required</p>
+            <p className="text-sm mt-1">Please sign in to save bookmarks.</p>
+          </div>
+          <div className="bg-gray-50 rounded-lg p-3 mb-4">
+            <p className="text-sm text-gray-600 break-all">{sharedUrl.url}</p>
+          </div>
+          <button
+            onClick={onClose}
+            className="w-full bg-gray-200 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-300 transition"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (buckets.length === 0) {
+    return (
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+        <div className="bg-white rounded-lg p-6 max-w-md w-full">
+          <h2 className="text-xl font-semibold mb-4">Save Bookmark</h2>
+          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 text-yellow-800 mb-4">
+            <p className="font-medium">No buckets available</p>
+            <p className="text-sm mt-1">Please create a bucket first to save bookmarks.</p>
+          </div>
+          <div className="bg-gray-50 rounded-lg p-3 mb-4">
+            <p className="text-sm text-gray-600 break-all">{sharedUrl.url}</p>
+          </div>
+          <button
+            onClick={onClose}
+            className="w-full bg-gray-200 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-300 transition"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+      <div className="bg-white rounded-lg p-6 max-w-lg w-full max-h-[90vh] overflow-y-auto">
+        <h2 className="text-xl font-semibold mb-4">Save Shared Link</h2>
+        
+        <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3 mb-4">
+          <p className="text-sm text-indigo-800 break-all">{sharedUrl.url}</p>
+        </div>
+
+        <form onSubmit={handleSubmit}>
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium mb-1">Bucket *</label>
+                <select
+                  value={selectedBucket}
+                  onChange={(e) => {
+                    setSelectedBucket(e.target.value);
+                    setSelectedCategory('');
+                  }}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  required
+                >
+                  <option value="">Select bucket</option>
+                  {buckets.map(bucket => (
+                    <option key={bucket.id} value={bucket.id}>
+                      {bucket.name}{bucket.isShared ? ' 👥' : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-1">Category *</label>
+                <select
+                  value={selectedCategory}
+                  onChange={(e) => setSelectedCategory(e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  required
+                  disabled={!selectedBucket}
+                >
+                  <option value="">Select category</option>
+                  {categories.map(category => (
+                    <option key={category.id} value={category.id}>{category.name}</option>
+                  ))}
+                </select>
+                {selectedBucket && categories.length === 0 && (
+                  <p className="text-xs text-red-600 mt-1">No categories in this bucket</p>
+                )}
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-1">Title *</label>
+              <input
+                type="text"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder="Bookmark title"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                required
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-1">Description</label>
+              <textarea
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="Brief description"
+                rows={2}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-1">Tags (comma-separated)</label>
+              <input
+                type="text"
+                value={tags}
+                onChange={(e) => setTags(e.target.value)}
+                placeholder="react, tutorial, javascript"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-1">Notes</label>
+              <textarea
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="Additional notes"
+                rows={2}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+          </div>
+
+          <div className="flex gap-2 mt-6">
+            <button
+              type="submit"
+              disabled={!selectedBucket || !selectedCategory || !title.trim()}
+              className="flex-1 bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Save Bookmark
             </button>
             <button
               type="button"
