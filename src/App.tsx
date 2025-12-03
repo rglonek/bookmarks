@@ -718,8 +718,12 @@ function App() {
 
   // Helper to check if user has write permission on a bucket
   const userHasWritePermission = useCallback((bucket: Bucket): boolean => {
+    // For non-shared (personal/local) buckets, always allow write
+    // This enables offline functionality for logged-out users
+    if (!bucket.isShared) return true;
+    
+    // For shared buckets, user must be logged in and have write permission
     if (!user) return false;
-    if (!bucket.isShared) return true; // Personal buckets always have write
     
     const userOwner = bucket.owners?.find(o => o.id === user.uid);
     return userOwner?.permission === 'write';
