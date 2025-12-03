@@ -7,6 +7,54 @@ service cloud.firestore {
       allow read, write: if request.auth != null && request.auth.uid == userId;
     }
     
+    // User profile - stores email lookup for sharing
+    match /userProfiles/{userId} {
+      // Anyone authenticated can read (for email lookup)
+      allow read: if request.auth != null;
+      // Only the user can write their own profile
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Shared buckets - accessible by all owners, writable by writers only
+    match /sharedBuckets/{bucketId} {
+      // Helper function to check if user has any access
+      function hasAccess() {
+        return request.auth != null && 
+               resource.data.ownerIds != null && 
+               request.auth.uid in resource.data.ownerIds;
+      }
+      
+      // Helper function to check if user has write access
+      function hasWriteAccess() {
+        return request.auth != null && 
+               resource.data.writerIds != null && 
+               request.auth.uid in resource.data.writerIds;
+      }
+      
+      // Allow read if user is in ownerIds array (all users with any access)
+      allow read: if hasAccess();
+      // Allow update if user is in ownerIds (any user can update - for leaving or content)
+      // Client code enforces that read-only users can only remove themselves
+      allow update: if hasAccess();
+      // Allow delete if user has write access OR is the last person
+      allow delete: if request.auth != null && (
+        hasWriteAccess() ||
+        (resource.data.ownerIds != null && resource.data.ownerIds.size() == 1)
+      );
+      // Allow create if user is authenticated and adds themselves as writer
+      allow create: if request.auth != null && 
+                       request.resource.data.writerIds != null &&
+                       request.auth.uid in request.resource.data.writerIds;
+    }
+    
+    // Email to user ID lookup (for sharing by email)
+    match /emailLookup/{email} {
+      // Anyone authenticated can read (to find users by email)
+      allow read: if request.auth != null;
+      // Only the owner can write their email mapping
+      allow write: if request.auth != null && request.resource.data.userId == request.auth.uid;
+    }
+    
     // Deny all other access by default
     match /{document=**} {
       allow read, write: if false;
