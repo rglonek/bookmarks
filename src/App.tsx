@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { AppData, Bucket, Category, Bookmark } from './types';
+import { AppData, Bucket, Category, Bookmark, SharedOwner, SharePermission } from './types';
 import { storage, createBucket, createCategory, createBookmark } from './storage';
-import { extractMetadata, auth, serverData } from './api';
+import { extractMetadata, auth, serverData, sharedBuckets, userProfile } from './api';
 import { User } from 'firebase/auth';
 
 type ViewMode = 'card' | 'grid' | 'list';
@@ -27,6 +27,18 @@ function App() {
   const [settlingBookmark, setSettlingBookmark] = useState<string | null>(null);
   const [showChromeImportModal, setShowChromeImportModal] = useState(false);
   const [chromeImportBucket, setChromeImportBucket] = useState<string>('');
+  
+  // Share modal state
+  const [showShareModal, setShowShareModal] = useState(false);
+  const [sharingBucket, setSharingBucket] = useState<Bucket | null>(null);
+  const [shareEmail, setShareEmail] = useState('');
+  const [sharePermission, setSharePermission] = useState<SharePermission>('read');
+  const [shareError, setShareError] = useState<string | null>(null);
+  const [shareSuccess, setShareSuccess] = useState<string | null>(null);
+  const [isSharing, setIsSharing] = useState(false);
+  
+  // Separate state for shared buckets
+  const [sharedBucketsData, setSharedBucketsData] = useState<Bucket[]>([]);
   
   // Firebase Authentication state
   const [user, setUser] = useState<User | null>(null);
@@ -180,6 +192,12 @@ function App() {
       } else {
         setServerReachable(true); // Server is reachable
       }
+      
+      // Also refresh shared buckets
+      const sharedResult = await sharedBuckets.loadAll(user.uid);
+      if (!sharedResult.error) {
+        setSharedBucketsData(sharedResult.buckets);
+      }
     } catch (error) {
       console.error('Sync error:', error);
       setServerReachable(false); // Server unreachable
@@ -192,9 +210,15 @@ function App() {
   const handleRefresh = async () => {
     if (!user || isSyncingRef.current) return;
     
-    setSyncStatus('syncing');
+    // Set syncing status immediately and track start time for minimum display duration
+    const startTime = Date.now();
+    const MIN_SYNCING_TIME = 500; // Show syncing for at least 500ms
     
     isSyncingRef.current = true;
+    setSyncStatus('syncing');
+    
+    let finalStatus: 'success' | 'error' = 'success';
+    
     try {
       const result = await serverData.check(user.uid);
       
@@ -213,24 +237,35 @@ function App() {
         }
       } else if (result.error) {
         setServerReachable(false);
-        setSyncStatus('error');
-        setTimeout(() => setSyncStatus('idle'), 2000);
-        isSyncingRef.current = false;
-        return;
+        finalStatus = 'error';
       } else {
         setServerReachable(true);
       }
       
-      setSyncStatus('success');
-      setTimeout(() => setSyncStatus('idle'), 1500);
+      // Also refresh shared buckets
+      const sharedResult = await sharedBuckets.loadAll(user.uid);
+      if (!sharedResult.error) {
+        setSharedBucketsData(sharedResult.buckets);
+      } else if (sharedResult.error) {
+        // Don't fail the whole sync if shared buckets fail
+        console.warn('Failed to load shared buckets:', sharedResult.error);
+      }
     } catch (error) {
       console.error('Sync error:', error);
       setServerReachable(false);
-      setSyncStatus('error');
-      setTimeout(() => setSyncStatus('idle'), 2000);
-    } finally {
-      isSyncingRef.current = false;
+      finalStatus = 'error';
     }
+    
+    // Ensure minimum display time for syncing animation
+    const elapsed = Date.now() - startTime;
+    const remainingTime = Math.max(0, MIN_SYNCING_TIME - elapsed);
+    
+    setTimeout(() => {
+      isSyncingRef.current = false;
+      setSyncStatus(finalStatus);
+      // Show success/error for 1.5 seconds before returning to idle
+      setTimeout(() => setSyncStatus('idle'), 1500);
+    }, remainingTime);
   };
 
   // Firebase Auth state listener
@@ -240,9 +275,18 @@ function App() {
       setIsAuthLoading(false);
       
       if (firebaseUser) {
+        // Register user's email for sharing lookup
+        await userProfile.registerEmail(firebaseUser);
+        
         // User is signed in - load and merge data
         const localData = storage.load();
         const serverResult = await serverData.load(firebaseUser.uid);
+        
+        // Also load shared buckets
+        const sharedResult = await sharedBuckets.loadAll(firebaseUser.uid);
+        if (!sharedResult.error) {
+          setSharedBucketsData(sharedResult.buckets);
+        }
         
         if (serverResult.data && !serverResult.error) {
           // Merge server and local data
@@ -256,16 +300,15 @@ function App() {
         }
         setIsLoaded(true);
         
-        // Select first bucket if none selected
+        // Select first bucket if none selected (including shared buckets)
         const finalData = serverResult.data ? mergeData(localData, serverResult.data) : localData;
-        if (finalData.buckets.length > 0) {
-          const activeBuckets = finalData.buckets.filter(b => !b.deleted);
-          if (activeBuckets.length > 0) {
-            setSelectedBucket(activeBuckets[0].id);
-          }
+        const allBucketsForSelection = [...finalData.buckets.filter(b => !b.deleted), ...sharedResult.buckets.filter(b => !b.deleted)];
+        if (allBucketsForSelection.length > 0) {
+          setSelectedBucket(allBucketsForSelection[0].id);
         }
       } else {
-        // User is signed out - load from local storage only
+        // User is signed out - load from local storage only, clear shared buckets
+        setSharedBucketsData([]);
         const loadedData = storage.load();
         setData(loadedData);
         setIsLoaded(true);
@@ -287,7 +330,7 @@ function App() {
   useEffect(() => {
     if (!isLoaded) return;
     
-    // Always save to localStorage (offline-first)
+    // Always save to localStorage (offline-first) - only personal buckets
     storage.save(data);
     
     // Also save to server if authenticated and online
@@ -315,6 +358,30 @@ function App() {
     
     return () => clearTimeout(timeoutId);
   }, [data, isLoaded, user, isOnline]);
+
+  // Save shared buckets whenever they change (only buckets user has write permission on)
+  useEffect(() => {
+    if (!isLoaded || !user || !isOnline) return;
+    
+    // Debounce shared bucket saves
+    const timeoutId = setTimeout(async () => {
+      for (const bucket of sharedBucketsData) {
+        // Only save buckets where user has write permission
+        const userOwner = bucket.owners?.find(o => o.id === user.uid);
+        if (userOwner?.permission !== 'write') {
+          continue; // Skip read-only buckets
+        }
+        
+        try {
+          await sharedBuckets.save(bucket.id, bucket);
+        } catch (err) {
+          console.error('Failed to save shared bucket:', err);
+        }
+      }
+    }, 500);
+    
+    return () => clearTimeout(timeoutId);
+  }, [sharedBucketsData, isLoaded, user, isOnline]);
 
   // Cleanup auto-scroll interval on unmount
   useEffect(() => {
@@ -369,10 +436,12 @@ function App() {
     };
   }, [user, syncWithServer]);
 
-  // Get all unique tags (excluding deleted bookmarks)
+  // Get all unique tags (excluding deleted bookmarks) - includes both personal and shared buckets
   const allTags = useMemo(() => {
     const tags = new Set<string>();
-    data.buckets.forEach(bucket => {
+    const allBuckets = [...data.buckets, ...sharedBucketsData];
+    
+    allBuckets.forEach(bucket => {
       if (bucket.deleted) return; // Skip deleted buckets
       bucket.categories.forEach(category => {
         if (category.deleted) return; // Skip deleted categories
@@ -383,14 +452,17 @@ function App() {
       });
     });
     return Array.from(tags).sort();
-  }, [data]);
+  }, [data, sharedBucketsData]);
 
-  // Search functionality (excluding deleted items)
+  // Search functionality (excluding deleted items) - includes both personal and shared buckets
   const searchResults = useMemo(() => {
     const results: Array<{ bookmark: Bookmark; bucket: Bucket; category: Category }> = [];
     const query = searchQuery.toLowerCase();
 
-    data.buckets.forEach(bucket => {
+    // Combine personal and shared buckets for searching
+    const allBuckets = [...data.buckets, ...sharedBucketsData];
+
+    allBuckets.forEach(bucket => {
       if (bucket.deleted) return; // Skip deleted buckets
       if (searchBucket !== 'all' && bucket.id !== searchBucket) return;
 
@@ -422,7 +494,7 @@ function App() {
     });
 
     return results;
-  }, [data, searchQuery, searchBucket, searchCategory, searchTag]);
+  }, [data, sharedBucketsData, searchQuery, searchBucket, searchCategory, searchTag]);
 
   const addBucket = (name: string) => {
     const newBucket = createBucket(name);
@@ -432,79 +504,45 @@ function App() {
 
   const addCategory = (bucketId: string, name: string) => {
     const newCategory = createCategory(name);
-    setData(prev => ({
-      ...prev,
-      buckets: prev.buckets.map(bucket =>
+    
+    // Check if this is a shared bucket
+    const isSharedBucket = sharedBucketsData.some(b => b.id === bucketId);
+    
+    if (isSharedBucket) {
+      setSharedBucketsData(prev => prev.map(bucket =>
         bucket.id === bucketId
           ? { ...bucket, categories: [...bucket.categories, newCategory] }
           : bucket
-      )
-    }));
-  };
-
-  const addOrUpdateBookmark = (bucketId: string, categoryId: string, bookmarkData: Omit<Bookmark, 'id' | 'createdAt' | 'updatedAt'>) => {
-    if (editingBookmark) {
-      // Update existing bookmark
-      setData(prev => ({
-        ...prev,
-        buckets: prev.buckets.map(bucket =>
-          bucket.id === bucketId
-            ? {
-                ...bucket,
-                categories: bucket.categories.map(category =>
-                  category.id === categoryId
-                    ? {
-                        ...category,
-                        bookmarks: category.bookmarks.map(b =>
-                          b.id === editingBookmark.id
-                            ? { ...bookmarkData, id: b.id, createdAt: b.createdAt, updatedAt: new Date().toISOString() }
-                            : b
-                        )
-                      }
-                    : category
-                )
-              }
-            : bucket
-        )
-      }));
+      ));
     } else {
-      // Add new bookmark
-      const newBookmark = createBookmark(bookmarkData);
       setData(prev => ({
         ...prev,
         buckets: prev.buckets.map(bucket =>
           bucket.id === bucketId
-            ? {
-                ...bucket,
-                categories: bucket.categories.map(category =>
-                  category.id === categoryId
-                    ? { ...category, bookmarks: [...category.bookmarks, newBookmark] }
-                    : category
-                )
-              }
+            ? { ...bucket, categories: [...bucket.categories, newCategory] }
             : bucket
         )
       }));
     }
   };
 
-  const deleteBookmark = (bucketId: string, categoryId: string, bookmarkId: string) => {
-    if (!confirm('Are you sure you want to delete this bookmark?')) return;
-
-    const now = new Date().toISOString();
-    setData(prev => ({
-      ...prev,
-      buckets: prev.buckets.map(bucket =>
+  const addOrUpdateBookmark = (bucketId: string, categoryId: string, bookmarkData: Omit<Bookmark, 'id' | 'createdAt' | 'updatedAt'>) => {
+    // Check if this is a shared bucket
+    const isSharedBucket = sharedBucketsData.some(b => b.id === bucketId);
+    
+    if (editingBookmark) {
+      // Update existing bookmark
+      const updateBuckets = (buckets: Bucket[]) => buckets.map(bucket =>
         bucket.id === bucketId
           ? {
               ...bucket,
               categories: bucket.categories.map(category =>
                 category.id === categoryId
-                  ? { 
-                      ...category, 
+                  ? {
+                      ...category,
                       bookmarks: category.bookmarks.map(b =>
-                        b.id === bookmarkId
-                          ? { ...b, deleted: true, deletedAt: now, updatedAt: now }
+                        b.id === editingBookmark.id
+                          ? { ...bookmarkData, id: b.id, createdAt: b.createdAt, updatedAt: new Date().toISOString() }
                           : b
                       )
                     }
@@ -512,26 +550,279 @@ function App() {
               )
             }
           : bucket
-      )
-    }));
+      );
+      
+      if (isSharedBucket) {
+        setSharedBucketsData(updateBuckets);
+      } else {
+        setData(prev => ({ ...prev, buckets: updateBuckets(prev.buckets) }));
+      }
+    } else {
+      // Add new bookmark
+      const newBookmark = createBookmark(bookmarkData);
+      const updateBuckets = (buckets: Bucket[]) => buckets.map(bucket =>
+        bucket.id === bucketId
+          ? {
+              ...bucket,
+              categories: bucket.categories.map(category =>
+                category.id === categoryId
+                  ? { ...category, bookmarks: [...category.bookmarks, newBookmark] }
+                  : category
+              )
+            }
+          : bucket
+      );
+      
+      if (isSharedBucket) {
+        setSharedBucketsData(updateBuckets);
+      } else {
+        setData(prev => ({ ...prev, buckets: updateBuckets(prev.buckets) }));
+      }
+    }
   };
 
-  const deleteBucket = (bucketId: string) => {
-    if (!confirm('Are you sure you want to delete this bucket and all its contents?')) return;
+  const deleteBookmark = (bucketId: string, categoryId: string, bookmarkId: string) => {
+    if (!confirm('Are you sure you want to delete this bookmark?')) return;
 
     const now = new Date().toISOString();
-    setData(prev => ({
-      ...prev,
-      buckets: prev.buckets.map(bucket =>
-        bucket.id === bucketId
-          ? { ...bucket, deleted: true, deletedAt: now }
-          : bucket
-      )
-    }));
+    
+    // Check if this is a shared bucket
+    const isSharedBucket = sharedBucketsData.some(b => b.id === bucketId);
+    
+    const updateBuckets = (buckets: Bucket[]) => buckets.map(bucket =>
+      bucket.id === bucketId
+        ? {
+            ...bucket,
+            categories: bucket.categories.map(category =>
+              category.id === categoryId
+                ? { 
+                    ...category, 
+                    bookmarks: category.bookmarks.map(b =>
+                      b.id === bookmarkId
+                        ? { ...b, deleted: true, deletedAt: now, updatedAt: now }
+                        : b
+                    )
+                  }
+                : category
+            )
+          }
+        : bucket
+    );
+    
+    if (isSharedBucket) {
+      setSharedBucketsData(updateBuckets);
+    } else {
+      setData(prev => ({ ...prev, buckets: updateBuckets(prev.buckets) }));
+    }
+  };
+
+  const deleteBucket = async (bucketId: string) => {
+    // Check if this is a shared bucket
+    const sharedBucket = sharedBucketsData.find(b => b.id === bucketId);
+    
+    if (sharedBucket) {
+      // For shared buckets, user "leaves" the bucket
+      const hasMultipleOwners = (sharedBucket.owners?.length || 0) > 1;
+      const confirmMessage = hasMultipleOwners
+        ? 'Are you sure you want to leave this shared bucket? Other users will still have access.'
+        : 'You are the last person with access. Deleting will permanently remove this bucket. Continue?';
+      
+      if (!confirm(confirmMessage)) return;
+      
+      if (user) {
+        const result = await sharedBuckets.leave(bucketId, user.uid, user.email || '');
+        if (result.success) {
+          setSharedBucketsData(prev => prev.filter(b => b.id !== bucketId));
+        } else {
+          alert(result.error || 'Failed to leave bucket');
+          return;
+        }
+      }
+    } else {
+      // Regular bucket deletion
+      if (!confirm('Are you sure you want to delete this bucket and all its contents?')) return;
+
+      const now = new Date().toISOString();
+      setData(prev => ({
+        ...prev,
+        buckets: prev.buckets.map(bucket =>
+          bucket.id === bucketId
+            ? { ...bucket, deleted: true, deletedAt: now }
+            : bucket
+        )
+      }));
+    }
 
     if (selectedBucket === bucketId) {
-      const activeBuckets = data.buckets.filter(b => !b.deleted && b.id !== bucketId);
-      setSelectedBucket(activeBuckets[0]?.id || null);
+      const allActiveBuckets = [
+        ...data.buckets.filter(b => !b.deleted && b.id !== bucketId),
+        ...sharedBucketsData.filter(b => b.id !== bucketId)
+      ];
+      setSelectedBucket(allActiveBuckets[0]?.id || null);
+    }
+  };
+
+  // Open share modal for a bucket
+  const openShareModal = (bucket: Bucket) => {
+    setSharingBucket(bucket);
+    setShareEmail('');
+    setShareError(null);
+    setShareSuccess(null);
+    setShowShareModal(true);
+  };
+
+  // Helper to check if user has write permission on a bucket
+  const userHasWritePermission = useCallback((bucket: Bucket): boolean => {
+    if (!user) return false;
+    if (!bucket.isShared) return true; // Personal buckets always have write
+    
+    const userOwner = bucket.owners?.find(o => o.id === user.uid);
+    return userOwner?.permission === 'write';
+  }, [user]);
+
+  // Share bucket with another user
+  const handleShareBucket = async () => {
+    if (!sharingBucket || !shareEmail.trim() || !user) return;
+    
+    setIsSharing(true);
+    setShareError(null);
+    setShareSuccess(null);
+    
+    try {
+      // Check if this bucket is already shared
+      const isAlreadyShared = sharingBucket.isShared;
+      
+      if (!isAlreadyShared) {
+        // Convert personal bucket to shared bucket first
+        const convertResult = await sharedBuckets.convertToShared(
+          user.uid,
+          user.email || '',
+          user.displayName || '',
+          sharingBucket
+        );
+        
+        if (!convertResult.success) {
+          setShareError(convertResult.error || 'Failed to convert bucket');
+          setIsSharing(false);
+          return;
+        }
+        
+        // Remove from personal buckets and add to shared
+        setData(prev => ({
+          ...prev,
+          buckets: prev.buckets.filter(b => b.id !== sharingBucket.id)
+        }));
+        
+        const newSharedBucket: Bucket = {
+          ...sharingBucket,
+          isShared: true,
+          owners: [{ id: user.uid, email: user.email || '', name: user.displayName || '', permission: 'write' }],
+          createdBy: user.uid
+        };
+        
+        setSharedBucketsData(prev => [...prev, newSharedBucket]);
+        setSharingBucket(newSharedBucket);
+      }
+      
+      // Now share with the target user (with selected permission)
+      const shareResult = await sharedBuckets.shareWithUser(sharingBucket.id, shareEmail.trim(), sharePermission);
+      
+      if (shareResult.success && shareResult.newOwner) {
+        const existingOwner = sharingBucket.owners?.find(o => o.email.toLowerCase() === shareEmail.trim().toLowerCase());
+        const message = existingOwner 
+          ? `Updated ${shareEmail}'s permission to ${sharePermission}`
+          : `Successfully shared with ${shareEmail} (${sharePermission})`;
+        setShareSuccess(message);
+        setShareEmail('');
+        
+        // Update local state with new/updated owner
+        setSharedBucketsData(prev => prev.map(b => {
+          if (b.id !== sharingBucket.id) return b;
+          
+          // Check if user already exists (permission update)
+          const existingIndex = (b.owners || []).findIndex(o => o.id === shareResult.newOwner!.id);
+          if (existingIndex >= 0) {
+            // Update existing owner
+            const updatedOwners = [...(b.owners || [])];
+            updatedOwners[existingIndex] = shareResult.newOwner!;
+            return { ...b, owners: updatedOwners };
+          } else {
+            // Add new owner
+            return { ...b, owners: [...(b.owners || []), shareResult.newOwner!] };
+          }
+        }));
+        setSharingBucket(prev => {
+          if (!prev) return null;
+          const existingIndex = (prev.owners || []).findIndex(o => o.id === shareResult.newOwner!.id);
+          if (existingIndex >= 0) {
+            const updatedOwners = [...(prev.owners || [])];
+            updatedOwners[existingIndex] = shareResult.newOwner!;
+            return { ...prev, owners: updatedOwners };
+          } else {
+            return { ...prev, owners: [...(prev.owners || []), shareResult.newOwner!] };
+          }
+        });
+      } else {
+        setShareError(shareResult.error || 'Failed to share bucket');
+      }
+    } catch (error) {
+      setShareError('An error occurred while sharing');
+      console.error('Share error:', error);
+    } finally {
+      setIsSharing(false);
+    }
+  };
+
+  // Update a user's permission level
+  const handleUpdatePermission = async (targetUserId: string, newPermission: SharePermission) => {
+    if (!sharingBucket || !user) return;
+    
+    const result = await sharedBuckets.updatePermission(sharingBucket.id, targetUserId, newPermission);
+    
+    if (result.success) {
+      // Update local state
+      setSharedBucketsData(prev => prev.map(b => 
+        b.id === sharingBucket.id
+          ? { 
+              ...b, 
+              owners: (b.owners || []).map(o => 
+                o.id === targetUserId ? { ...o, permission: newPermission } : o
+              )
+            }
+          : b
+      ));
+      setSharingBucket(prev => prev ? {
+        ...prev,
+        owners: (prev.owners || []).map(o => 
+          o.id === targetUserId ? { ...o, permission: newPermission } : o
+        )
+      } : null);
+    } else {
+      alert(result.error || 'Failed to update permission');
+    }
+  };
+
+  // Remove a user from shared bucket
+  const handleRemoveUser = async (targetUserId: string, targetEmail: string) => {
+    if (!sharingBucket || !user) return;
+    
+    if (!confirm(`Remove ${targetEmail} from this shared bucket?`)) return;
+    
+    const result = await sharedBuckets.removeUser(sharingBucket.id, targetUserId, targetEmail);
+    
+    if (result.success) {
+      // Update local state
+      setSharedBucketsData(prev => prev.map(b => 
+        b.id === sharingBucket.id
+          ? { ...b, owners: (b.owners || []).filter(o => o.id !== targetUserId) }
+          : b
+      ));
+      setSharingBucket(prev => prev ? {
+        ...prev,
+        owners: (prev.owners || []).filter(o => o.id !== targetUserId)
+      } : null);
+    } else {
+      alert(result.error || 'Failed to remove user');
     }
   };
 
@@ -539,21 +830,28 @@ function App() {
     if (!confirm('Are you sure you want to delete this category and all its bookmarks?')) return;
 
     const now = new Date().toISOString();
-    setData(prev => ({
-      ...prev,
-      buckets: prev.buckets.map(bucket =>
-        bucket.id === bucketId
-          ? { 
-              ...bucket, 
-              categories: bucket.categories.map(c =>
-                c.id === categoryId
-                  ? { ...c, deleted: true, deletedAt: now }
-                  : c
-              )
-            }
-          : bucket
-      )
-    }));
+    
+    // Check if this is a shared bucket
+    const isSharedBucket = sharedBucketsData.some(b => b.id === bucketId);
+    
+    const updateBuckets = (buckets: Bucket[]) => buckets.map(bucket =>
+      bucket.id === bucketId
+        ? { 
+            ...bucket, 
+            categories: bucket.categories.map(c =>
+              c.id === categoryId
+                ? { ...c, deleted: true, deletedAt: now }
+                : c
+            )
+          }
+        : bucket
+    );
+    
+    if (isSharedBucket) {
+      setSharedBucketsData(updateBuckets);
+    } else {
+      setData(prev => ({ ...prev, buckets: updateBuckets(prev.buckets) }));
+    }
 
     if (selectedCategory === categoryId) {
       setSelectedCategory(null);
@@ -561,28 +859,43 @@ function App() {
   };
 
   const renameBucket = (bucketId: string, newName: string) => {
-    setData(prev => ({
-      ...prev,
-      buckets: prev.buckets.map(bucket =>
+    // Check if this is a shared bucket
+    const isSharedBucket = sharedBucketsData.some(b => b.id === bucketId);
+    
+    if (isSharedBucket) {
+      setSharedBucketsData(prev => prev.map(bucket =>
         bucket.id === bucketId ? { ...bucket, name: newName } : bucket
-      )
-    }));
+      ));
+    } else {
+      setData(prev => ({
+        ...prev,
+        buckets: prev.buckets.map(bucket =>
+          bucket.id === bucketId ? { ...bucket, name: newName } : bucket
+        )
+      }));
+    }
   };
 
   const renameCategory = (bucketId: string, categoryId: string, newName: string) => {
-    setData(prev => ({
-      ...prev,
-      buckets: prev.buckets.map(bucket =>
-        bucket.id === bucketId
-          ? {
-              ...bucket,
-              categories: bucket.categories.map(category =>
-                category.id === categoryId ? { ...category, name: newName } : category
-              )
-            }
-          : bucket
-      )
-    }));
+    // Check if this is a shared bucket
+    const isSharedBucket = sharedBucketsData.some(b => b.id === bucketId);
+    
+    const updateBuckets = (buckets: Bucket[]) => buckets.map(bucket =>
+      bucket.id === bucketId
+        ? {
+            ...bucket,
+            categories: bucket.categories.map(category =>
+              category.id === categoryId ? { ...category, name: newName } : category
+            )
+          }
+        : bucket
+    );
+    
+    if (isSharedBucket) {
+      setSharedBucketsData(updateBuckets);
+    } else {
+      setData(prev => ({ ...prev, buckets: updateBuckets(prev.buckets) }));
+    }
   };
 
   // Clean up tombstones older than 30 days
@@ -725,36 +1038,42 @@ function App() {
     }
 
     const droppedId = draggedBookmark.bookmarkId;
+    
+    // Check if this is a shared bucket
+    const isSharedBucket = sharedBucketsData.some(b => b.id === bucketId);
+    
+    const updateBuckets = (buckets: Bucket[]) => buckets.map(bucket =>
+      bucket.id === bucketId
+        ? {
+            ...bucket,
+            categories: bucket.categories.map(category =>
+              category.id === categoryId
+                ? {
+                    ...category,
+                    bookmarks: (() => {
+                      const bookmarks = [...category.bookmarks];
+                      const draggedIndex = bookmarks.findIndex(b => b.id === draggedBookmark.bookmarkId);
+                      const targetIndex = bookmarks.findIndex(b => b.id === targetBookmarkId);
+                      
+                      if (draggedIndex === -1 || targetIndex === -1) return bookmarks;
+                      
+                      const [draggedItem] = bookmarks.splice(draggedIndex, 1);
+                      bookmarks.splice(targetIndex, 0, draggedItem);
+                      
+                      return bookmarks;
+                    })()
+                  }
+                : category
+            )
+          }
+        : bucket
+    );
 
-    setData(prev => ({
-      ...prev,
-      buckets: prev.buckets.map(bucket =>
-        bucket.id === bucketId
-          ? {
-              ...bucket,
-              categories: bucket.categories.map(category =>
-                category.id === categoryId
-                  ? {
-                      ...category,
-                      bookmarks: (() => {
-                        const bookmarks = [...category.bookmarks];
-                        const draggedIndex = bookmarks.findIndex(b => b.id === draggedBookmark.bookmarkId);
-                        const targetIndex = bookmarks.findIndex(b => b.id === targetBookmarkId);
-                        
-                        if (draggedIndex === -1 || targetIndex === -1) return bookmarks;
-                        
-                        const [draggedItem] = bookmarks.splice(draggedIndex, 1);
-                        bookmarks.splice(targetIndex, 0, draggedItem);
-                        
-                        return bookmarks;
-                      })()
-                    }
-                  : category
-              )
-            }
-          : bucket
-      )
-    }));
+    if (isSharedBucket) {
+      setSharedBucketsData(updateBuckets);
+    } else {
+      setData(prev => ({ ...prev, buckets: updateBuckets(prev.buckets) }));
+    }
 
     // Trigger settling animation
     setSettlingBookmark(droppedId);
@@ -779,38 +1098,44 @@ function App() {
     }
 
     const droppedId = draggedBookmark.bookmarkId;
+    
+    // Check if this is a shared bucket
+    const isSharedBucket = sharedBucketsData.some(b => b.id === bucketId);
+    
+    const updateBuckets = (buckets: Bucket[]) => buckets.map(bucket =>
+      bucket.id === bucketId
+        ? {
+            ...bucket,
+            categories: bucket.categories.map(category =>
+              category.id === categoryId
+                ? {
+                    ...category,
+                    bookmarks: (() => {
+                      const bookmarks = [...category.bookmarks];
+                      const draggedIndex = bookmarks.findIndex(b => b.id === draggedBookmark.bookmarkId);
+                      
+                      if (draggedIndex === -1) return bookmarks;
+                      
+                      const [draggedItem] = bookmarks.splice(draggedIndex, 1);
+                      
+                      // Adjust position if dragged item was before the target position
+                      const adjustedPosition = draggedIndex < position ? position - 1 : position;
+                      bookmarks.splice(adjustedPosition, 0, draggedItem);
+                      
+                      return bookmarks;
+                    })()
+                  }
+                : category
+            )
+          }
+        : bucket
+    );
 
-    setData(prev => ({
-      ...prev,
-      buckets: prev.buckets.map(bucket =>
-        bucket.id === bucketId
-          ? {
-              ...bucket,
-              categories: bucket.categories.map(category =>
-                category.id === categoryId
-                  ? {
-                      ...category,
-                      bookmarks: (() => {
-                        const bookmarks = [...category.bookmarks];
-                        const draggedIndex = bookmarks.findIndex(b => b.id === draggedBookmark.bookmarkId);
-                        
-                        if (draggedIndex === -1) return bookmarks;
-                        
-                        const [draggedItem] = bookmarks.splice(draggedIndex, 1);
-                        
-                        // Adjust position if dragged item was before the target position
-                        const adjustedPosition = draggedIndex < position ? position - 1 : position;
-                        bookmarks.splice(adjustedPosition, 0, draggedItem);
-                        
-                        return bookmarks;
-                      })()
-                    }
-                  : category
-              )
-            }
-          : bucket
-      )
-    }));
+    if (isSharedBucket) {
+      setSharedBucketsData(updateBuckets);
+    } else {
+      setData(prev => ({ ...prev, buckets: updateBuckets(prev.buckets) }));
+    }
 
     // Trigger settling animation
     setSettlingBookmark(droppedId);
@@ -1036,11 +1361,19 @@ function App() {
   };
 
   // Sort buckets and categories alphabetically, filtering out deleted items
+  // Combines personal buckets and shared buckets
   const sortedBuckets = useMemo(() => {
-    return [...data.buckets]
-      .filter(b => !b.deleted) // Filter out deleted buckets
+    const personalBuckets = data.buckets
+      .filter(b => !b.deleted)
+      .map(b => ({ ...b, isShared: false as const }));
+    
+    const shared = sharedBucketsData
+      .filter(b => !b.deleted)
+      .map(b => ({ ...b, isShared: true as const }));
+    
+    return [...personalBuckets, ...shared]
       .sort((a, b) => a.name.localeCompare(b.name));
-  }, [data.buckets]);
+  }, [data.buckets, sharedBucketsData]);
 
   const currentBucket = sortedBuckets.find(b => b.id === selectedBucket);
   
@@ -1216,8 +1549,10 @@ function App() {
                 className="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
               >
                 <option value="all">All Buckets</option>
-                {data.buckets.map(bucket => (
-                  <option key={bucket.id} value={bucket.id}>{bucket.name}</option>
+                {sortedBuckets.map(bucket => (
+                  <option key={bucket.id} value={bucket.id}>
+                    {bucket.name}{bucket.isShared ? ' 👥' : ''}
+                  </option>
                 ))}
               </select>
               <select
@@ -1226,9 +1561,13 @@ function App() {
                 className="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
               >
                 <option value="all">All Categories</option>
-                {data.buckets.flatMap(b => b.categories).map(category => (
-                  <option key={category.id} value={category.id}>{category.name}</option>
-                ))}
+                {[...data.buckets, ...sharedBucketsData]
+                  .filter(b => !b.deleted)
+                  .flatMap(b => b.categories.filter(c => !c.deleted))
+                  .map(category => (
+                    <option key={category.id} value={category.id}>{category.name}</option>
+                  ))
+                }
               </select>
               <select
                 value={searchTag}
@@ -1290,6 +1629,7 @@ function App() {
                     bucketName={bucket.name}
                     categoryName={category.name}
                     viewMode={viewMode}
+                    canEdit={userHasWritePermission(bucket)}
                     onEdit={() => {
                       setEditingBookmark(bookmark);
                       setSelectedBucket(bucket.id);
@@ -1354,29 +1694,71 @@ function App() {
                             }}
                           />
                         ) : (
-                          <span className="font-medium truncate">{bucket.name}</span>
+                          <div className="flex items-center gap-2 min-w-0 flex-1">
+                            <span className="font-medium truncate">{bucket.name}</span>
+                            {bucket.isShared && (
+                              <span 
+                                className="text-xs bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded flex-shrink-0" 
+                                title={`Shared with ${(bucket.owners?.length || 1)} ${(bucket.owners?.length || 1) === 1 ? 'person' : 'people'}`}
+                              >
+                                👥 {bucket.owners?.length || 1}
+                              </span>
+                            )}
+                          </div>
                         )}
                         <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition">
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setRenamingBucket(bucket.id);
-                            }}
-                            className="text-blue-500 hover:text-blue-700 text-sm"
-                            title="Rename"
-                          >
-                            ✏️
-                          </button>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              deleteBucket(bucket.id);
-                            }}
-                            className="text-red-500 hover:text-red-700"
-                            title="Delete"
-                          >
-                            ×
-                          </button>
+                          {/* Share button - only show for users with write permission */}
+                          {user && userHasWritePermission(bucket) && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openShareModal(bucket);
+                              }}
+                              className="text-purple-500 hover:text-purple-700 text-sm"
+                              title="Share"
+                            >
+                              🔗
+                            </button>
+                          )}
+                          {/* View share info - for read-only users */}
+                          {user && bucket.isShared && !userHasWritePermission(bucket) && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openShareModal(bucket);
+                              }}
+                              className="text-gray-400 hover:text-gray-600 text-sm"
+                              title="View sharing info"
+                            >
+                              👁️
+                            </button>
+                          )}
+                          {/* Rename - only for write permission */}
+                          {userHasWritePermission(bucket) && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setRenamingBucket(bucket.id);
+                              }}
+                              className="text-blue-500 hover:text-blue-700 text-sm"
+                              title="Rename"
+                            >
+                              ✏️
+                            </button>
+                          )}
+                          {/* Delete/Leave - always show for shared buckets (to leave), only write for personal */}
+                          {(bucket.isShared || userHasWritePermission(bucket)) && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                deleteBucket(bucket.id);
+                              }}
+                              className="text-red-500 hover:text-red-700"
+                              title={bucket.isShared ? "Leave bucket" : "Delete"}
+                            >
+                              {bucket.isShared ? '🚪' : '×'}
+                            </button>
+                          )}
                         </div>
                       </div>
                     ))}
@@ -1397,12 +1779,14 @@ function App() {
                   <div className="bg-white rounded-lg shadow-md p-4 mb-6">
                     <div className="flex justify-between items-center mb-4">
                       <h2 className="text-lg font-semibold">Categories in {currentBucket.name} (A-Z)</h2>
-                      <button
-                        onClick={() => setShowCategoryModal(true)}
-                        className="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition text-sm"
-                      >
-                        + Add Category
-                      </button>
+                      {userHasWritePermission(currentBucket) && (
+                        <button
+                          onClick={() => setShowCategoryModal(true)}
+                          className="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition text-sm"
+                        >
+                          + Add Category
+                        </button>
+                      )}
                     </div>
                     {sortedCategories.length === 0 ? (
                       <p className="text-gray-500 text-sm">No categories yet.</p>
@@ -1449,30 +1833,32 @@ function App() {
                                 <span className="text-xs opacity-75">({category.bookmarks.length})</span>
                               </>
                             )}
-                            <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition">
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setRenamingCategory(category.id);
-                                }}
-                                className={`text-sm ${selectedCategory === category.id ? 'text-white hover:text-blue-200' : 'text-blue-500 hover:text-blue-700'}`}
-                                title="Rename"
-                              >
-                                ✏️
-                              </button>
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  deleteCategory(currentBucket.id, category.id);
-                                }}
-                                className={`hover:text-red-500 ${
-                                  selectedCategory === category.id ? 'text-white' : 'text-red-500'
-                                }`}
-                                title="Delete"
-                              >
-                                ×
-                              </button>
-                            </div>
+                            {userHasWritePermission(currentBucket) && (
+                              <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition">
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setRenamingCategory(category.id);
+                                  }}
+                                  className={`text-sm ${selectedCategory === category.id ? 'text-white hover:text-blue-200' : 'text-blue-500 hover:text-blue-700'}`}
+                                  title="Rename"
+                                >
+                                  ✏️
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    deleteCategory(currentBucket.id, category.id);
+                                  }}
+                                  className={`hover:text-red-500 ${
+                                    selectedCategory === category.id ? 'text-white' : 'text-red-500'
+                                  }`}
+                                  title="Delete"
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -1508,19 +1894,21 @@ function App() {
                               ▦
                             </button>
                           </div>
-                          <button
-                            onClick={() => {
-                              setEditingBookmark(null);
-                              setShowBookmarkModal(true);
-                            }}
-                            className="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition text-sm"
-                          >
-                            + Add Bookmark
-                          </button>
+                          {userHasWritePermission(currentBucket) && (
+                            <button
+                              onClick={() => {
+                                setEditingBookmark(null);
+                                setShowBookmarkModal(true);
+                              }}
+                              className="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition text-sm"
+                            >
+                              + Add Bookmark
+                            </button>
+                          )}
                         </div>
                       </div>
                       {currentCategory.bookmarks.length === 0 ? (
-                        <p className="text-gray-500 text-sm">No bookmarks yet.</p>
+                        <p className="text-gray-500 text-sm">{userHasWritePermission(currentBucket) ? 'No bookmarks yet.' : 'No bookmarks yet. (View only)'}</p>
                       ) : (
                         <div>
                           {/* Drop zone at the beginning */}
@@ -1547,10 +1935,11 @@ function App() {
                                   viewMode={viewMode}
                                   isDragging={draggedBookmark?.bookmarkId === bookmark.id}
                                   isSettling={settlingBookmark === bookmark.id}
-                                  onDragStart={(e) => handleDragStart(e, currentBucket.id, currentCategory.id, bookmark.id)}
-                                  onDragOver={handleDragOver}
-                                  onDrop={() => handleDrop(currentBucket.id, currentCategory.id, bookmark.id)}
-                                  onDragEnd={handleDragEnd}
+                                  canEdit={userHasWritePermission(currentBucket)}
+                                  onDragStart={userHasWritePermission(currentBucket) ? (e) => handleDragStart(e, currentBucket.id, currentCategory.id, bookmark.id) : undefined}
+                                  onDragOver={userHasWritePermission(currentBucket) ? handleDragOver : undefined}
+                                  onDrop={userHasWritePermission(currentBucket) ? () => handleDrop(currentBucket.id, currentCategory.id, bookmark.id) : undefined}
+                                  onDragEnd={userHasWritePermission(currentBucket) ? handleDragEnd : undefined}
                                   onEdit={() => {
                                     setEditingBookmark(bookmark);
                                     setShowBookmarkModal(true);
@@ -1692,24 +2081,30 @@ function App() {
             return metadata;
           }}
           onSave={(bookmarkData, targetBucketId, targetCategoryId) => {
+            const isCurrentShared = sharedBucketsData.some(b => b.id === currentBucket.id);
+            const isTargetShared = sharedBucketsData.some(b => b.id === targetBucketId);
+            
             // If bookmark is being moved to a different location
             if (editingBookmark && (targetBucketId !== currentBucket.id || targetCategoryId !== currentCategory.id)) {
               // Delete from old location
-              setData(prev => ({
-                ...prev,
-                buckets: prev.buckets.map(bucket =>
-                  bucket.id === currentBucket.id
-                    ? {
-                        ...bucket,
-                        categories: bucket.categories.map(category =>
-                          category.id === currentCategory.id
-                            ? { ...category, bookmarks: category.bookmarks.filter(b => b.id !== editingBookmark.id) }
-                            : category
-                        )
-                      }
-                    : bucket
-                )
-              }));
+              const removeFromBuckets = (buckets: Bucket[]) => buckets.map(bucket =>
+                bucket.id === currentBucket.id
+                  ? {
+                      ...bucket,
+                      categories: bucket.categories.map(category =>
+                        category.id === currentCategory.id
+                          ? { ...category, bookmarks: category.bookmarks.filter(b => b.id !== editingBookmark.id) }
+                          : category
+                      )
+                    }
+                  : bucket
+              );
+              
+              if (isCurrentShared) {
+                setSharedBucketsData(removeFromBuckets);
+              } else {
+                setData(prev => ({ ...prev, buckets: removeFromBuckets(prev.buckets) }));
+              }
               
               // Add to new location with updated data
               const updatedBookmark = {
@@ -1719,21 +2114,24 @@ function App() {
                 updatedAt: new Date().toISOString()
               };
               
-              setData(prev => ({
-                ...prev,
-                buckets: prev.buckets.map(bucket =>
-                  bucket.id === targetBucketId
-                    ? {
-                        ...bucket,
-                        categories: bucket.categories.map(category =>
-                          category.id === targetCategoryId
-                            ? { ...category, bookmarks: [...category.bookmarks, updatedBookmark] }
-                            : category
-                        )
-                      }
-                    : bucket
-                )
-              }));
+              const addToBuckets = (buckets: Bucket[]) => buckets.map(bucket =>
+                bucket.id === targetBucketId
+                  ? {
+                      ...bucket,
+                      categories: bucket.categories.map(category =>
+                        category.id === targetCategoryId
+                          ? { ...category, bookmarks: [...category.bookmarks, updatedBookmark] }
+                          : category
+                      )
+                    }
+                  : bucket
+              );
+              
+              if (isTargetShared) {
+                setSharedBucketsData(addToBuckets);
+              } else {
+                setData(prev => ({ ...prev, buckets: addToBuckets(prev.buckets) }));
+              }
             } else {
               // Normal update/create in same location
               addOrUpdateBookmark(targetBucketId, targetCategoryId, bookmarkData);
@@ -1809,6 +2207,152 @@ function App() {
           </div>
         </Modal>
       )}
+
+      {/* Share Bucket Modal */}
+      {showShareModal && sharingBucket && (
+        <Modal onClose={() => setShowShareModal(false)}>
+          <h2 className="text-xl font-semibold mb-4">
+            {userHasWritePermission(sharingBucket) ? 'Share' : 'Sharing Info'} "{sharingBucket.name}"
+          </h2>
+          <div className="space-y-4">
+            {/* Existing owners list */}
+            {sharingBucket.isShared && sharingBucket.owners && sharingBucket.owners.length > 0 && (
+              <div>
+                <label className="block text-sm font-medium mb-2">People with access:</label>
+                <div className="space-y-2 max-h-48 overflow-y-auto">
+                  {sharingBucket.owners.map((owner: SharedOwner) => (
+                    <div 
+                      key={owner.id} 
+                      className="flex items-center justify-between bg-gray-50 rounded-lg p-2"
+                    >
+                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                        <div className="w-8 h-8 bg-indigo-100 rounded-full flex items-center justify-center text-indigo-700 font-medium text-sm flex-shrink-0">
+                          {(owner.name || owner.email).charAt(0).toUpperCase()}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium truncate">{owner.name || owner.email}</p>
+                          <p className="text-xs text-gray-500 truncate">{owner.email}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        {/* Permission badge/selector */}
+                        {owner.id === sharingBucket.createdBy ? (
+                          <span className="text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded">Owner</span>
+                        ) : owner.id === user?.uid ? (
+                          <span className={`text-xs px-2 py-0.5 rounded ${owner.permission === 'write' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>
+                            {owner.permission === 'write' ? 'Can edit' : 'View only'}
+                          </span>
+                        ) : userHasWritePermission(sharingBucket) ? (
+                          <select
+                            value={owner.permission || 'read'}
+                            onChange={(e) => handleUpdatePermission(owner.id, e.target.value as SharePermission)}
+                            className="text-xs border border-gray-300 rounded px-1 py-0.5 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                          >
+                            <option value="read">View only</option>
+                            <option value="write">Can edit</option>
+                          </select>
+                        ) : (
+                          <span className={`text-xs px-2 py-0.5 rounded ${owner.permission === 'write' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>
+                            {owner.permission === 'write' ? 'Can edit' : 'View only'}
+                          </span>
+                        )}
+                        
+                        {/* You badge */}
+                        {owner.id === user?.uid && (
+                          <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded">You</span>
+                        )}
+                        
+                        {/* Remove button - only for users with write permission, can't remove creator or self */}
+                        {userHasWritePermission(sharingBucket) && owner.id !== user?.uid && owner.id !== sharingBucket.createdBy && (
+                          <button
+                            onClick={() => handleRemoveUser(owner.id, owner.email)}
+                            className="text-red-500 hover:text-red-700 text-sm ml-1"
+                            title="Remove access"
+                          >
+                            ×
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Add new person - only for users with write permission */}
+            {userHasWritePermission(sharingBucket) && (
+              <div>
+                <label className="block text-sm font-medium mb-2">
+                  Share with someone new:
+                </label>
+                <div className="flex gap-2 mb-2">
+                  <input
+                    type="email"
+                    value={shareEmail}
+                    onChange={(e) => setShareEmail(e.target.value)}
+                    placeholder="Enter email address"
+                    className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                  <select
+                    value={sharePermission}
+                    onChange={(e) => setSharePermission(e.target.value as SharePermission)}
+                    className="px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="read">View only</option>
+                    <option value="write">Can edit</option>
+                  </select>
+                  <button
+                    onClick={handleShareBucket}
+                    disabled={!shareEmail.trim() || isSharing}
+                    className="bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isSharing ? '...' : 'Share'}
+                  </button>
+                </div>
+                <p className="text-xs text-gray-500">
+                  The person must have signed in at least once. You can also update existing users' permissions.
+                </p>
+              </div>
+            )}
+
+            {/* Read-only notice for users without write permission */}
+            {!userHasWritePermission(sharingBucket) && sharingBucket.isShared && (
+              <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm text-gray-600">
+                You have <strong>view-only</strong> access to this bucket. Contact a user with edit permissions to change sharing settings.
+              </div>
+            )}
+
+            {/* Error message */}
+            {shareError && (
+              <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded-lg text-sm">
+                {shareError}
+              </div>
+            )}
+
+            {/* Success message */}
+            {shareSuccess && (
+              <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-2 rounded-lg text-sm">
+                {shareSuccess}
+              </div>
+            )}
+
+            {/* Info box for non-shared buckets */}
+            {!sharingBucket.isShared && (
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-800">
+                <strong>Note:</strong> Sharing this bucket will convert it to a shared bucket. 
+                Users with "Can edit" permission can add, edit, and delete bookmarks. "View only" users can only browse.
+              </div>
+            )}
+
+            <button
+              onClick={() => setShowShareModal(false)}
+              className="w-full bg-gray-200 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-300 transition"
+            >
+              Done
+            </button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -1832,6 +2376,7 @@ function BookmarkCard({
   viewMode = 'card',
   isDragging = false,
   isSettling = false,
+  canEdit = true,
   onDragStart,
   onDragOver,
   onDrop,
@@ -1845,6 +2390,7 @@ function BookmarkCard({
   viewMode?: ViewMode;
   isDragging?: boolean;
   isSettling?: boolean;
+  canEdit?: boolean;
   onDragStart?: (e: React.DragEvent) => void;
   onDragOver?: (e: React.DragEvent) => void;
   onDrop?: () => void;
@@ -1894,10 +2440,12 @@ function BookmarkCard({
             </div>
           )}
         </div>
-        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition">
-          <button onClick={onEdit} className="text-blue-500 hover:text-blue-700 px-2">✏️</button>
-          <button onClick={onDelete} className="text-red-500 hover:text-red-700 px-2">🗑️</button>
-        </div>
+        {canEdit && (
+          <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition">
+            <button onClick={onEdit} className="text-blue-500 hover:text-blue-700 px-2">✏️</button>
+            <button onClick={onDelete} className="text-red-500 hover:text-red-700 px-2">🗑️</button>
+          </div>
+        )}
       </div>
     );
   }
@@ -1916,10 +2464,12 @@ function BookmarkCard({
       >
         <div className="flex justify-between items-start mb-2">
           <h3 className="font-semibold text-sm truncate flex-1 pr-2">{bookmark.title}</h3>
-          <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition">
-            <button onClick={onEdit} className="text-blue-500 hover:text-blue-700 text-xs">✏️</button>
-            <button onClick={onDelete} className="text-red-500 hover:text-red-700 text-xs">🗑️</button>
-          </div>
+          {canEdit && (
+            <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition">
+              <button onClick={onEdit} className="text-blue-500 hover:text-blue-700 text-xs">✏️</button>
+              <button onClick={onDelete} className="text-red-500 hover:text-red-700 text-xs">🗑️</button>
+            </div>
+          )}
         </div>
         <a
           href={bookmark.url}
@@ -1956,10 +2506,12 @@ function BookmarkCard({
     >
       <div className="flex justify-between items-start mb-2">
         <h3 className="font-semibold text-lg truncate flex-1">{bookmark.title}</h3>
-        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition">
-          <button onClick={onEdit} className="text-blue-500 hover:text-blue-700 px-2">✏️</button>
-          <button onClick={onDelete} className="text-red-500 hover:text-red-700 px-2">🗑️</button>
-        </div>
+        {canEdit && (
+          <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition">
+            <button onClick={onEdit} className="text-blue-500 hover:text-blue-700 px-2">✏️</button>
+            <button onClick={onDelete} className="text-red-500 hover:text-red-700 px-2">🗑️</button>
+          </div>
+        )}
       </div>
       {bucketName && categoryName && (
         <p className="text-xs text-gray-500 mb-2">
