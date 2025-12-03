@@ -33,7 +33,17 @@ export default mergeConfig(
               purpose: 'any maskable'
             }
           ],
-          categories: ['productivity', 'utilities']
+          categories: ['productivity', 'utilities'],
+          // Share Target API - receive shared links from other apps
+          share_target: {
+            action: '/',
+            method: 'GET',
+            params: {
+              title: 'title',
+              text: 'text', 
+              url: 'url'
+            }
+          }
         },
         workbox: {
           // Cache all static assets
