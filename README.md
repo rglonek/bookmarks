@@ -23,6 +23,16 @@ npm run cap:android
 
 See [Mobile App Setup Guide](./docs/MOBILE_APP_SETUP.md) for full instructions.
 
+### Chrome extension
+
+Save the current page and browse your library from a toolbar button:
+
+```bash
+npm run build:extension
+```
+
+Load `extension/dist` as an unpacked extension. Sign-in setup is in [extension/README.md](./extension/README.md).
+
 ## Features
 
 ### Core Features

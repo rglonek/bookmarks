@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Bookmarks</title>
+    <link rel="stylesheet" href="./popup.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <div class="brand">
+          <span class="logo-wrap" aria-hidden="true">
+            <svg class="logo" viewBox="0 0 24 24">
+              <path fill="currentColor" d="M6 3.5A1.5 1.5 0 0 1 7.5 2h9A1.5 1.5 0 0 1 18 3.5V21l-6-3.5L6 21V3.5z" />
+            </svg>
+          </span>
+          <div>
+            <h1>Bookmarks</h1>
+            <p id="account"></p>
+          </div>
+        </div>
+        <button id="sign-out" class="ghost" type="button" hidden>Sign out</button>
+      </header>
+
+      <p id="loading">Loading…</p>
+
+      <section id="signed-out" hidden>
+        <p id="intro"></p>
+        <p id="config-help" class="help" hidden></p>
+        <p id="oauth-help" class="help" hidden></p>
+        <p id="extension-id-row" class="id-row" hidden>
+          <span>Extension ID</span>
+          <code id="extension-id"></code>
+        </p>
+        <button id="sign-in" class="primary" type="button">Sign in with Google</button>
+        <p id="auth-error" class="message error" role="alert"></p>
+      </section>
+
+      <section id="signed-in" hidden>
+        <section class="panel">
+          <h2>This page</h2>
+          <p id="page-title" class="page-title"></p>
+          <p id="page-url" class="page-url"></p>
+          <p id="page-reason" class="message info" hidden></p>
+          <div id="destination">
+            <label class="field" id="bucket-field">
+              <span>Bucket</span>
+              <select id="bucket"></select>
+            </label>
+            <label class="field" id="new-bucket-field" hidden>
+              <span>Bucket</span>
+              <input id="new-bucket" type="text" value="Inbox" maxlength="80" autocomplete="off" />
+            </label>
+            <label class="field" id="category-field">
+              <span>Category</span>
+              <select id="category"></select>
+            </label>
+            <label class="field" id="new-category-field" hidden>
+              <span>Category</span>
+              <input id="new-category" type="text" value="Unsorted" maxlength="80" autocomplete="off" />
+            </label>
+            <button id="save" class="primary" type="button" disabled>Save bookmark</button>
+          </div>
+          <p id="save-status" class="message" role="status"></p>
+        </section>
+
+        <section class="panel library">
+          <div class="library-head">
+            <h2>Library</h2>
+            <span id="count" class="count">0</span>
+          </div>
+          <input id="search" type="search" placeholder="Search bookmarks" autocomplete="off" />
+          <ul id="list"></ul>
+          <p id="list-empty" class="empty" hidden>Saved pages will show up here.</p>
+          <p id="list-more" class="more" hidden></p>
+        </section>
+      </section>
+    </div>
+    <script type="module" src="./src/popup.ts"></script>
+  </body>
+</html>

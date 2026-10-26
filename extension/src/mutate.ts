@@ -1,0 +1,186 @@
+import { createBucket, createCategory } from '../../src/storage';
+import type { AppData, Bookmark, Bucket, Category } from '../../src/types';
+
+export interface ListedBookmark {
+  id: string;
+  title: string;
+  url: string;
+  description: string;
+  notes: string;
+  tags: string[];
+  bucketName: string;
+  categoryName: string;
+  updatedAt: string;
+}
+
+export type SaveInput = {
+  bookmark: Bookmark;
+} & (
+  | { mode: 'new-bucket'; bucketName: string; categoryName: string }
+  | { mode: 'new-category'; bucketId: string; categoryName: string }
+  | { mode: 'existing'; bucketId: string; categoryId: string }
+);
+
+export type SaveResult =
+  | {
+      status: 'added';
+      data: AppData;
+      bucketId: string;
+      categoryId: string;
+      bucketName: string;
+      categoryName: string;
+    }
+  | { status: 'duplicate'; bucketName: string; categoryName: string }
+  | { status: 'missing' };
+
+export function normalizeUrl(url: string): string {
+  const trimmed = url.trim();
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.pathname.length > 1 && parsed.pathname.endsWith('/')) {
+      parsed.pathname = parsed.pathname.replace(/\/+$/, '');
+    }
+    return parsed.toString();
+  } catch {
+    return trimmed;
+  }
+}
+
+export function activeBuckets(data: AppData): Bucket[] {
+  return (data.buckets ?? [])
+    .filter((bucket) => !bucket.deleted)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function activeCategories(bucket: Bucket): Category[] {
+  return (bucket.categories ?? [])
+    .filter((category) => !category.deleted)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function listBookmarks(data: AppData): ListedBookmark[] {
+  const items: ListedBookmark[] = [];
+  for (const bucket of data.buckets ?? []) {
+    if (bucket.deleted) continue;
+    for (const category of bucket.categories ?? []) {
+      if (category.deleted) continue;
+      for (const bookmark of category.bookmarks ?? []) {
+        if (bookmark.deleted) continue;
+        items.push({
+          id: bookmark.id,
+          title: bookmark.title,
+          url: bookmark.url,
+          description: bookmark.description ?? '',
+          notes: bookmark.notes ?? '',
+          tags: bookmark.tags ?? [],
+          bucketName: bucket.name,
+          categoryName: category.name,
+          updatedAt: bookmark.updatedAt,
+        });
+      }
+    }
+  }
+  items.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  return items;
+}
+
+export function filterBookmarks(items: ListedBookmark[], query: string): ListedBookmark[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return items;
+  return items.filter((item) =>
+    item.title.toLowerCase().includes(needle) ||
+    item.url.toLowerCase().includes(needle) ||
+    item.description.toLowerCase().includes(needle) ||
+    item.notes.toLowerCase().includes(needle) ||
+    item.bucketName.toLowerCase().includes(needle) ||
+    item.categoryName.toLowerCase().includes(needle) ||
+    item.tags.some((tag) => tag.toLowerCase().includes(needle))
+  );
+}
+
+export function applySave(original: AppData, input: SaveInput): SaveResult {
+  const buckets = original.buckets ?? [];
+  const duplicate = findActiveDuplicate(buckets, input.bookmark.url);
+  if (duplicate) return { status: 'duplicate', ...duplicate };
+
+  if (input.mode !== 'new-bucket') {
+    const bucket = buckets.find((item) => item.id === input.bucketId && !item.deleted);
+    if (!bucket) return { status: 'missing' };
+    if (input.mode === 'existing') {
+      const category = (bucket.categories ?? []).find((item) => item.id === input.categoryId && !item.deleted);
+      if (!category) return { status: 'missing' };
+    }
+  }
+
+  const data = JSON.parse(JSON.stringify({ buckets })) as AppData;
+
+  if (input.mode === 'new-bucket') {
+    const bucketName = cleanName(input.bucketName, 'Inbox');
+    const categoryName = cleanName(input.categoryName, 'Unsorted');
+    const category = createCategory(categoryName);
+    category.bookmarks = [input.bookmark];
+    const bucket = createBucket(bucketName);
+    bucket.categories = [category];
+    data.buckets = [...data.buckets, bucket];
+    return {
+      status: 'added',
+      data,
+      bucketId: bucket.id,
+      categoryId: category.id,
+      bucketName,
+      categoryName,
+    };
+  }
+
+  const bucket = data.buckets.find((item) => item.id === input.bucketId && !item.deleted);
+  if (!bucket) return { status: 'missing' };
+
+  if (input.mode === 'new-category') {
+    const categoryName = cleanName(input.categoryName, 'Unsorted');
+    const category = createCategory(categoryName);
+    category.bookmarks = [input.bookmark];
+    bucket.categories = [...(bucket.categories ?? []), category];
+    return {
+      status: 'added',
+      data,
+      bucketId: bucket.id,
+      categoryId: category.id,
+      bucketName: bucket.name,
+      categoryName,
+    };
+  }
+
+  const category = (bucket.categories ?? []).find((item) => item.id === input.categoryId && !item.deleted);
+  if (!category) return { status: 'missing' };
+  category.bookmarks = [...(category.bookmarks ?? []), input.bookmark];
+  return {
+    status: 'added',
+    data,
+    bucketId: bucket.id,
+    categoryId: category.id,
+    bucketName: bucket.name,
+    categoryName: category.name,
+  };
+}
+
+function cleanName(name: string, fallback: string): string {
+  const trimmed = name.trim();
+  return trimmed || fallback;
+}
+
+function findActiveDuplicate(buckets: Bucket[], url: string): { bucketName: string; categoryName: string } | null {
+  const needle = normalizeUrl(url);
+  for (const bucket of buckets) {
+    if (bucket.deleted) continue;
+    for (const category of bucket.categories ?? []) {
+      if (category.deleted) continue;
+      for (const bookmark of category.bookmarks ?? []) {
+        if (bookmark.deleted) continue;
+        if (normalizeUrl(bookmark.url) === needle) {
+          return { bucketName: bucket.name, categoryName: category.name };
+        }
+      }
+    }
+  }
+  return null;
+}

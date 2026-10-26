@@ -1,0 +1,259 @@
+* { box-sizing: border-box; }
+
+body {
+  width: 380px;
+  margin: 0;
+  color: #1e1b4b;
+  background: #f8fafc;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+#app {
+  max-height: 600px;
+  display: flex;
+  flex-direction: column;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  background: white;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.logo-wrap {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  flex: none;
+  color: white;
+  background: #4f46e5;
+  border-radius: 8px;
+}
+
+.logo { width: 16px; height: 16px; }
+
+h1, h2, p { margin: 0; }
+
+h1 { font-size: 14px; line-height: 1.2; }
+
+h2 {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+
+#account {
+  color: #64748b;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button, input, select { font: inherit; color: inherit; }
+
+button { cursor: pointer; }
+
+.ghost {
+  border: 0;
+  background: transparent;
+  color: #4338ca;
+  font-size: 12px;
+  padding: 4px;
+}
+
+.primary {
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: #4f46e5;
+  color: white;
+  font-weight: 600;
+}
+
+.primary:hover { background: #4338ca; }
+
+.primary:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid #4f46e5;
+  outline-offset: 1px;
+}
+
+#loading,
+#signed-out,
+.panel { padding: 12px; }
+
+#signed-out { display: flex; flex-direction: column; gap: 10px; }
+
+#signed-in {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 8px;
+}
+
+.panel { padding-bottom: 4px; }
+
+.page-title {
+  margin-top: 6px;
+  font-weight: 600;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.page-url,
+.row-url,
+.row-meta {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.page-url {
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#destination {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field span {
+  font-size: 12px;
+  color: #475569;
+}
+
+input, select {
+  width: 100%;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: white;
+  padding: 7px 8px;
+}
+
+.message {
+  min-height: 1.2em;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.message:empty { display: none; }
+
+.message.ok { color: #047857; }
+.message.info { color: #4338ca; }
+.message.error { color: #b91c1c; }
+
+.help { color: #334155; }
+
+.id-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+code {
+  display: block;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: white;
+  border: 1px solid #e2e8f0;
+  color: #1e1b4b;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  user-select: all;
+}
+
+.library { min-height: 0; }
+
+.library-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.count {
+  color: #64748b;
+  font-size: 12px;
+}
+
+#search { margin-bottom: 8px; }
+
+#list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 260px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.row {
+  width: 100%;
+  text-align: left;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: white;
+  padding: 8px;
+}
+
+.row:hover { background: #eef2ff; }
+
+.row-title,
+.row-meta,
+.row-url {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-title { font-weight: 600; }
+
+.empty, .more {
+  margin: 4px 0 8px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+[hidden] { display: none !important; }

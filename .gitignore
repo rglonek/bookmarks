@@ -20,6 +20,7 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+extension/dist
 *.local
 
 # Functions dependencies (optional - some prefer to commit this)
