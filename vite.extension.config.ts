@@ -49,6 +49,8 @@ function extensionAssets(clientId: string): Plugin {
           48: 'icons/icon128.png',
           128: 'icons/icon128.png',
         },
+        // Runs the interactive sign-in, which would close the popup midway
+        background: { service_worker: 'background.js', type: 'module' },
         permissions: ['identity', 'storage', 'activeTab', 'scripting'],
       };
 
@@ -85,9 +87,12 @@ export default defineConfig(({ mode }) => {
       modulePreload: false,
       sourcemap: false,
       rollupOptions: {
-        input: resolve(root, 'extension/popup.html'),
+        input: {
+          popup: resolve(root, 'extension/popup.html'),
+          background: resolve(root, 'extension/src/background.ts'),
+        },
         output: {
-          entryFileNames: 'popup.js',
+          entryFileNames: '[name].js',
           chunkFileNames: 'chunks/[name].js',
           assetFileNames: 'assets/[name][extname]',
         },

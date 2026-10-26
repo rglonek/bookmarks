@@ -69,3 +69,19 @@ function errorCode(error: unknown): string {
   }
   return '';
 }
+
+// Interactive sign-in runs in the background service worker (background.ts):
+// Chrome's account and consent window takes focus, which closes the popup and
+// would cut a sign-in started there off midway.
+export const SIGN_IN_MESSAGE = 'bookmarks:sign-in';
+
+export type SignInResponse = { ok: true } | { ok: false; message: string };
+
+/** Ask the background worker to sign in. Used by the popup. */
+export async function requestSignIn(): Promise<SignInResponse> {
+  const response: unknown = await chrome.runtime.sendMessage({ type: SIGN_IN_MESSAGE });
+  if (response && typeof response === 'object' && 'ok' in response) {
+    return response as SignInResponse;
+  }
+  return { ok: false, message: 'Sign-in did not respond. Try again.' };
+}

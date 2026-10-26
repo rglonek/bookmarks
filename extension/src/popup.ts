@@ -3,7 +3,7 @@ import type { User } from 'firebase/auth';
 import { createBookmark } from '../../src/storage';
 import { isWebUrl } from '../../src/url';
 import type { AppData } from '../../src/types';
-import { friendlyAuthError, oauthClientConfigured, signInWithGoogle, signOutOfExtension } from './auth';
+import { friendlyAuthError, oauthClientConfigured, requestSignIn, signOutOfExtension } from './auth';
 import { auth, firebaseConfigProblem } from './firebase';
 import { friendlySaveError, loadLibrary, saveBookmark } from './library';
 import {
@@ -99,7 +99,16 @@ async function onSignIn(): Promise<void> {
   signInButton.disabled = true;
   signInButton.textContent = 'Signing in…';
   try {
-    await signInWithGoogle();
+    const result = await requestSignIn();
+    if (!result.ok) {
+      authError.textContent = result.message;
+      return;
+    }
+    // The background worker signed in. This popup's Firebase Auth notices the
+    // session in shared storage on its own; reload if it hasn't shortly.
+    window.setTimeout(() => {
+      if (!auth?.currentUser) location.reload();
+    }, 1500);
   } catch (error) {
     authError.textContent = friendlyAuthError(error);
   } finally {
