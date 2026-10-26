@@ -1377,6 +1377,12 @@ function App() {
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [data.buckets, sharedBucketsData]);
 
+  // Buckets the user can add bookmarks to (excludes view-only shared buckets)
+  const writableBuckets = useMemo(
+    () => sortedBuckets.filter(userHasWritePermission),
+    [sortedBuckets, userHasWritePermission]
+  );
+
   const currentBucket = sortedBuckets.find(b => b.id === selectedBucket);
   
   const sortedCategories = useMemo(() => {
@@ -2069,7 +2075,7 @@ function App() {
           bookmark={editingBookmark}
           currentBucketId={currentBucket.id}
           currentCategoryId={currentCategory.id}
-          allBuckets={sortedBuckets}
+          allBuckets={writableBuckets}
           isExtracting={isExtracting}
           isAuthenticated={!!user}
           onExtract={async (url) => {
@@ -2370,7 +2376,7 @@ function App() {
       {showAddSharedBookmarkModal && sharedUrl && (
         <AddSharedBookmarkModal
           sharedUrl={sharedUrl}
-          buckets={sortedBuckets}
+          buckets={writableBuckets}
           isAuthenticated={!!user}
           onSave={(bucketId, categoryId, bookmarkData) => {
             const isSharedBucket = sharedBucketsData.some(b => b.id === bucketId);
@@ -2637,7 +2643,11 @@ function BookmarkModal({
   
   // Get categories for selected bucket
   const selectedBucket = allBuckets.find(b => b.id === formData.bucketId);
-  const availableCategories = selectedBucket ? [...selectedBucket.categories].sort((a, b) => a.name.localeCompare(b.name)) : [];
+  // Categories that can take a bookmark: not deleted, A-Z
+  const liveCategories = (bucket?: Bucket) => bucket
+    ? bucket.categories.filter(c => !c.deleted).sort((a, b) => a.name.localeCompare(b.name))
+    : [];
+  const availableCategories = liveCategories(selectedBucket);
 
   const handleUrlChange = async (url: string) => {
     setFormData(prev => ({ ...prev, url }));
@@ -2709,7 +2719,7 @@ function BookmarkModal({
                   onChange={(e) => {
                     const newBucketId = e.target.value;
                     const newBucket = allBuckets.find(b => b.id === newBucketId);
-                    const firstCategory = newBucket?.categories[0];
+                    const firstCategory = liveCategories(newBucket)[0];
                     setFormData(prev => ({
                       ...prev,
                       bucketId: newBucketId,
