@@ -47,38 +47,10 @@ export default mergeConfig(
         },
         workbox: {
           // Cache all static assets
-          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
-          // Runtime caching for API requests
-          runtimeCaching: [
-            {
-              urlPattern: /^https:\/\/.*firebaseio\.com\/.*/i,
-              handler: 'NetworkFirst',
-              options: {
-                cacheName: 'firebase-cache',
-                expiration: {
-                  maxEntries: 50,
-                  maxAgeSeconds: 60 * 60 * 24 // 24 hours
-                },
-                cacheableResponse: {
-                  statuses: [0, 200]
-                }
-              }
-            },
-            {
-              urlPattern: /^https:\/\/firestore\.googleapis\.com\/.*/i,
-              handler: 'NetworkFirst',
-              options: {
-                cacheName: 'firestore-cache',
-                expiration: {
-                  maxEntries: 50,
-                  maxAgeSeconds: 60 * 60 * 24
-                },
-                cacheableResponse: {
-                  statuses: [0, 200]
-                }
-              }
-            }
-          ]
+          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}']
+          // No runtime caching of Firebase/Firestore API calls: the Firestore SDK
+          // handles its own offline behaviour, and cached responses would keep
+          // signed-in data in Cache Storage after sign-out.
         },
         devOptions: {
           enabled: true // Enable PWA in development for testing
