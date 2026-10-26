@@ -1675,6 +1675,8 @@ function App() {
                   onClick={() => setViewMode('list')}
                   className={`px-3 py-1 rounded text-sm ${viewMode === 'list' ? 'bg-indigo-600 text-white' : 'hover:bg-gray-200'}`}
                   title="List view"
+                  aria-label="List view"
+                  aria-pressed={viewMode === 'list'}
                 >
                   ☰
                 </button>
@@ -1682,6 +1684,8 @@ function App() {
                   onClick={() => setViewMode('grid')}
                   className={`px-3 py-1 rounded text-sm ${viewMode === 'grid' ? 'bg-indigo-600 text-white' : 'hover:bg-gray-200'}`}
                   title="Grid view"
+                  aria-label="Grid view"
+                  aria-pressed={viewMode === 'grid'}
                 >
                   ⊞
                 </button>
@@ -1689,6 +1693,8 @@ function App() {
                   onClick={() => setViewMode('card')}
                   className={`px-3 py-1 rounded text-sm ${viewMode === 'card' ? 'bg-indigo-600 text-white' : 'hover:bg-gray-200'}`}
                   title="Card view"
+                  aria-label="Card view"
+                  aria-pressed={viewMode === 'card'}
                 >
                   ▦
                 </button>
@@ -1798,6 +1804,7 @@ function App() {
                               }}
                               className="text-purple-500 hover:text-purple-700 text-sm"
                               title="Share"
+                              aria-label={`Share ${bucket.name}`}
                             >
                               🔗
                             </button>
@@ -1811,6 +1818,7 @@ function App() {
                               }}
                               className="text-gray-400 hover:text-gray-600 text-sm"
                               title="View sharing info"
+                              aria-label={`Sharing info for ${bucket.name}`}
                             >
                               👁️
                             </button>
@@ -1824,6 +1832,7 @@ function App() {
                               }}
                               className="text-blue-500 hover:text-blue-700 text-sm"
                               title="Rename"
+                              aria-label={`Rename ${bucket.name}`}
                             >
                               ✏️
                             </button>
@@ -1837,6 +1846,7 @@ function App() {
                               }}
                               className="text-red-500 hover:text-red-700"
                               title={bucket.isShared ? "Leave bucket" : "Delete"}
+                              aria-label={`${bucket.isShared ? 'Leave' : 'Delete'} ${bucket.name}`}
                             >
                               {bucket.isShared ? '🚪' : '×'}
                             </button>
@@ -1924,6 +1934,7 @@ function App() {
                                   }}
                                   className={`text-sm ${selectedCategory === category.id ? 'text-white hover:text-blue-200' : 'text-blue-500 hover:text-blue-700'}`}
                                   title="Rename"
+                                  aria-label={`Rename ${category.name}`}
                                 >
                                   ✏️
                                 </button>
@@ -1936,6 +1947,7 @@ function App() {
                                     selectedCategory === category.id ? 'text-white' : 'text-red-500'
                                   }`}
                                   title="Delete"
+                                  aria-label={`Delete ${category.name}`}
                                 >
                                   ×
                                 </button>
@@ -1958,6 +1970,8 @@ function App() {
                               onClick={() => setViewMode('list')}
                               className={`px-3 py-1 rounded text-sm ${viewMode === 'list' ? 'bg-indigo-600 text-white' : 'hover:bg-gray-200'}`}
                               title="List view"
+                              aria-label="List view"
+                              aria-pressed={viewMode === 'list'}
                             >
                               ☰
                             </button>
@@ -1965,6 +1979,8 @@ function App() {
                               onClick={() => setViewMode('grid')}
                               className={`px-3 py-1 rounded text-sm ${viewMode === 'grid' ? 'bg-indigo-600 text-white' : 'hover:bg-gray-200'}`}
                               title="Grid view"
+                              aria-label="Grid view"
+                              aria-pressed={viewMode === 'grid'}
                             >
                               ⊞
                             </button>
@@ -1972,6 +1988,8 @@ function App() {
                               onClick={() => setViewMode('card')}
                               className={`px-3 py-1 rounded text-sm ${viewMode === 'card' ? 'bg-indigo-600 text-white' : 'hover:bg-gray-200'}`}
                               title="Card view"
+                              aria-label="Card view"
+                              aria-pressed={viewMode === 'card'}
                             >
                               ▦
                             </button>
@@ -2065,7 +2083,7 @@ function App() {
 
       {/* Modals */}
       {showBucketModal && (
-        <Modal onClose={() => setShowBucketModal(false)}>
+        <Modal onClose={() => setShowBucketModal(false)} label="Create new bucket">
           <h2 className="text-xl font-semibold mb-4">Create New Bucket</h2>
           <form
             onSubmit={(e) => {
@@ -2105,7 +2123,7 @@ function App() {
       )}
 
       {showCategoryModal && currentBucket && (
-        <Modal onClose={() => setShowCategoryModal(false)}>
+        <Modal onClose={() => setShowCategoryModal(false)} label="Create new category">
           <h2 className="text-xl font-semibold mb-4">Create New Category</h2>
           <form
             onSubmit={(e) => {
@@ -2236,7 +2254,7 @@ function App() {
       )}
 
       {showChromeImportModal && (
-        <Modal onClose={() => setShowChromeImportModal(false)}>
+        <Modal onClose={() => setShowChromeImportModal(false)} label="Import Chrome bookmarks">
           <h2 className="text-xl font-semibold mb-4">Import Chrome Bookmarks</h2>
           <div className="space-y-4">
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm">
@@ -2300,7 +2318,7 @@ function App() {
 
       {/* Share Bucket Modal */}
       {showShareModal && sharingBucket && (
-        <Modal onClose={() => setShowShareModal(false)}>
+        <Modal onClose={() => setShowShareModal(false)} label="Share bucket">
           <h2 className="text-xl font-semibold mb-4">
             {userHasWritePermission(sharingBucket) ? 'Share' : 'Sharing Info'} "{sharingBucket.name}"
           </h2>
@@ -2358,6 +2376,7 @@ function App() {
                             onClick={() => handleRemoveUser(owner.id, owner.email)}
                             className="text-red-500 hover:text-red-700 text-sm ml-1"
                             title="Remove access"
+                            aria-label={`Remove ${owner.email}`}
                           >
                             ×
                           </button>
@@ -2503,11 +2522,44 @@ function App() {
   );
 }
 
-// Modal Component
-function Modal({ children, onClose: _onClose }: { children: React.ReactNode; onClose: () => void }) {
+// Modal Component: closes on Escape and on a click on the backdrop
+function Modal({
+  children,
+  onClose,
+  label,
+  widthClass = 'max-w-md'
+}: {
+  children: React.ReactNode;
+  onClose: () => void;
+  label: string;
+  widthClass?: string;
+}) {
+  // Latest onClose, without re-adding the key listener on every render
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  });
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onCloseRef.current();
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, []);
+
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-      <div className="bg-white rounded-lg p-6 max-w-md w-full" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={label}
+        className={`bg-white rounded-lg p-6 ${widthClass} w-full max-h-[90vh] overflow-y-auto`}
+      >
         {children}
       </div>
     </div>
@@ -2589,8 +2641,8 @@ function BookmarkCard({
         </div>
         {canEdit && (
           <div className={`flex gap-1 ${ITEM_ACTIONS}`}>
-            <button onClick={onEdit} className="text-blue-500 hover:text-blue-700 px-2">✏️</button>
-            <button onClick={onDelete} className="text-red-500 hover:text-red-700 px-2">🗑️</button>
+            <button onClick={onEdit} className="text-blue-500 hover:text-blue-700 px-2" title="Edit" aria-label={`Edit ${bookmark.title}`}>✏️</button>
+            <button onClick={onDelete} className="text-red-500 hover:text-red-700 px-2" title="Delete" aria-label={`Delete ${bookmark.title}`}>🗑️</button>
           </div>
         )}
       </div>
@@ -2613,8 +2665,8 @@ function BookmarkCard({
           <h3 className="font-semibold text-sm truncate flex-1 pr-2">{bookmark.title}</h3>
           {canEdit && (
             <div className={`flex gap-1 ${ITEM_ACTIONS}`}>
-              <button onClick={onEdit} className="text-blue-500 hover:text-blue-700 text-xs">✏️</button>
-              <button onClick={onDelete} className="text-red-500 hover:text-red-700 text-xs">🗑️</button>
+              <button onClick={onEdit} className="text-blue-500 hover:text-blue-700 text-xs" title="Edit" aria-label={`Edit ${bookmark.title}`}>✏️</button>
+              <button onClick={onDelete} className="text-red-500 hover:text-red-700 text-xs" title="Delete" aria-label={`Delete ${bookmark.title}`}>🗑️</button>
             </div>
           )}
         </div>
@@ -2656,8 +2708,8 @@ function BookmarkCard({
         <h3 className="font-semibold text-lg truncate flex-1">{bookmark.title}</h3>
         {canEdit && (
           <div className={`flex gap-1 ${ITEM_ACTIONS}`}>
-            <button onClick={onEdit} className="text-blue-500 hover:text-blue-700 px-2">✏️</button>
-            <button onClick={onDelete} className="text-red-500 hover:text-red-700 px-2">🗑️</button>
+            <button onClick={onEdit} className="text-blue-500 hover:text-blue-700 px-2" title="Edit" aria-label={`Edit ${bookmark.title}`}>✏️</button>
+            <button onClick={onDelete} className="text-red-500 hover:text-red-700 px-2" title="Delete" aria-label={`Delete ${bookmark.title}`}>🗑️</button>
           </div>
         )}
       </div>
@@ -2793,8 +2845,7 @@ function BookmarkModal({
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-      <div className="bg-white rounded-lg p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+    <Modal onClose={onClose} label={bookmark ? 'Edit bookmark' : 'Create new bookmark'} widthClass="max-w-2xl">
         <h2 className="text-xl font-semibold mb-4">
           {bookmark ? 'Edit Bookmark' : 'Create New Bookmark'}
         </h2>
@@ -2926,8 +2977,7 @@ function BookmarkModal({
             </button>
           </div>
         </form>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -2994,8 +3044,7 @@ function AddSharedBookmarkModal({
   const fieldClass = "w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500";
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-      <div className="bg-white rounded-lg p-6 max-w-lg w-full max-h-[90vh] overflow-y-auto">
+    <Modal onClose={onClose} label="Save shared link" widthClass="max-w-lg">
         <h2 className="text-xl font-semibold mb-4">Save Shared Link</h2>
         
         <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3 mb-4">
@@ -3135,8 +3184,7 @@ function AddSharedBookmarkModal({
             </button>
           </div>
         </form>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
