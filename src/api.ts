@@ -33,6 +33,33 @@ export interface MetadataResponse {
   description: string;
 }
 
+// Why a Firestore call failed, in terms the app can act on:
+// - unreachable: offline or the backend didn't answer; retrying later helps
+// - denied: rules refused it (signed out, or access changed)
+// - too-large: the document would exceed Firestore's 1 MiB limit
+// - failed: anything else
+export type SyncFailure = 'unreachable' | 'denied' | 'too-large' | 'failed';
+
+export function syncFailureOf(error: unknown): SyncFailure {
+  const code = error && typeof error === 'object' && 'code' in error
+    ? String((error as { code: unknown }).code)
+    : '';
+  const message = error instanceof Error ? error.message : '';
+  switch (code) {
+    case 'unavailable':
+    case 'deadline-exceeded':
+    case 'cancelled':
+      return 'unreachable';
+    case 'permission-denied':
+    case 'unauthenticated':
+      return 'denied';
+  }
+  if (code === 'invalid-argument' && /size|too large|exceeds/i.test(message)) {
+    return 'too-large';
+  }
+  return 'failed';
+}
+
 // Cloud Function for metadata extraction
 const extractMetadataFunction = httpsCallable<{ url: string }, MetadataResponse>(
   functions, 
@@ -150,7 +177,7 @@ function changeMarker(docData: Record<string, unknown>): string | null {
 
 export const serverData = {
   // Load user data from Firestore
-  async load(userId: string): Promise<{ data?: AppData; lastModified?: string | null; error?: string }> {
+  async load(userId: string): Promise<{ data?: AppData; lastModified?: string | null; error?: string; failure?: SyncFailure }> {
     try {
       const docSnap = await getDoc(libraryDoc(userId));
 
@@ -169,7 +196,7 @@ export const serverData = {
       };
     } catch (error) {
       console.error('Error loading data from Firestore:', error);
-      return { error: 'Failed to load data' };
+      return { error: 'Failed to load data', failure: syncFailureOf(error) };
     }
   },
 
@@ -177,7 +204,7 @@ export const serverData = {
   // transaction instead of overwriting it, so changes saved elsewhere since
   // this device last pulled (another device, the Chrome extension) are kept.
   // Returns the merged library that was written.
-  async save(userId: string, data: AppData): Promise<{ success: boolean; data?: AppData; lastModified?: string; error?: string }> {
+  async save(userId: string, data: AppData): Promise<{ success: boolean; data?: AppData; lastModified?: string; error?: string; failure?: SyncFailure }> {
     try {
       const docRef = libraryDoc(userId);
       const now = new Date().toISOString();
@@ -202,18 +229,18 @@ export const serverData = {
       };
     } catch (error) {
       console.error('Error saving data to Firestore:', error);
-      return { success: false, error: 'Failed to save data' };
+      return { success: false, error: 'Failed to save data', failure: syncFailureOf(error) };
     }
   },
 
   // Check last modified timestamp
-  async check(userId: string): Promise<{ lastModified?: string | null; error?: string }> {
+  async check(userId: string): Promise<{ lastModified?: string | null; error?: string; failure?: SyncFailure }> {
     try {
       const docSnap = await getDoc(libraryDoc(userId));
       return { lastModified: docSnap.exists() ? changeMarker(docSnap.data()) : null };
     } catch (error) {
       console.error('Error checking data:', error);
-      return { error: 'Failed to check data' };
+      return { error: 'Failed to check data', failure: syncFailureOf(error) };
     }
   }
 };
@@ -278,7 +305,7 @@ export const userProfile = {
 // Shared buckets API
 export const sharedBuckets = {
   // Load all shared buckets for a user
-  async loadAll(userId: string): Promise<{ buckets: Bucket[]; error?: string }> {
+  async loadAll(userId: string): Promise<{ buckets: Bucket[]; error?: string; failure?: SyncFailure }> {
     try {
       const sharedBucketsRef = collection(db, 'sharedBuckets');
       const q = query(sharedBucketsRef, where('ownerIds', 'array-contains', userId));
@@ -299,7 +326,7 @@ export const sharedBuckets = {
       return { buckets };
     } catch (error) {
       console.error('Error loading shared buckets:', error);
-      return { buckets: [], error: 'Failed to load shared buckets' };
+      return { buckets: [], error: 'Failed to load shared buckets', failure: syncFailureOf(error) };
     }
   },
 
@@ -350,7 +377,7 @@ export const sharedBuckets = {
   // transaction, so collaborators' changes since this device last loaded the
   // bucket are kept. Membership fields are left as the server has them.
   // Returns the merged bucket that was written.
-  async save(bucketId: string, bucket: Bucket): Promise<{ success: boolean; bucket?: Bucket; error?: string }> {
+  async save(bucketId: string, bucket: Bucket): Promise<{ success: boolean; bucket?: Bucket; error?: string; failure?: SyncFailure }> {
     try {
       const docRef = doc(db, 'sharedBuckets', bucketId);
 
@@ -379,7 +406,7 @@ export const sharedBuckets = {
       return { success: true, bucket: merged };
     } catch (error) {
       console.error('Error saving shared bucket:', error);
-      return { success: false, error: 'Failed to save shared bucket' };
+      return { success: false, error: 'Failed to save shared bucket', failure: syncFailureOf(error) };
     }
   },
 

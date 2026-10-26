@@ -2,11 +2,18 @@ import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { AppData, Bucket, Category, Bookmark, SharedOwner, SharePermission } from './types';
 import { storage, createBucket, createCategory, createBookmark, generateId } from './storage';
 import { bucketContentKey, mergeBucket, mergeData, mergeSharedBuckets, pruneTombstones, replaceLibrary } from './merge';
-import { extractMetadata, auth, serverData, sharedBuckets, userProfile } from './api';
+import { extractMetadata, auth, serverData, sharedBuckets, userProfile, syncFailureOf, type SyncFailure } from './api';
 import { User } from 'firebase/auth';
 import { isWebUrl } from './url';
 
 type ViewMode = 'card' | 'grid' | 'list';
+
+// Shown in a banner when syncing fails for a reason other than being offline
+const SYNC_PROBLEM_MESSAGES: Record<Exclude<SyncFailure, 'unreachable'>, string> = {
+  denied: 'The cloud refused your changes (permission denied). They are kept on this device. Signing out and back in usually fixes this.',
+  'too-large': 'Your library is too large to sync (Firestore allows 1 MB per library). Changes are kept on this device. Delete some bookmarks or buckets to sync again.',
+  failed: 'Syncing failed. Your changes are kept on this device. Use Refresh to try again.',
+};
 
 // Helper to open URLs in external browser (especially for PWA on iOS)
 const openExternalLink = (url: string, e?: React.MouseEvent) => {
@@ -94,6 +101,19 @@ function App() {
   // Network state
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [serverReachable, setServerReachable] = useState(true);
+  // A sync failure that waiting won't fix (see SYNC_PROBLEM_MESSAGES)
+  const [syncProblem, setSyncProblem] = useState<string | null>(null);
+  // Bumped by Refresh to retry the server save even if nothing changed
+  const [saveNonce, setSaveNonce] = useState(0);
+  
+  const noteSyncFailure = useCallback((failure: SyncFailure = 'unreachable') => {
+    if (failure === 'unreachable') {
+      setServerReachable(false);
+      return;
+    }
+    setServerReachable(true);
+    setSyncProblem(SYNC_PROBLEM_MESSAGES[failure]);
+  }, []);
   
   // Sync feedback state
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'success' | 'error'>('idle');
@@ -112,7 +132,7 @@ function App() {
     const result = await serverData.check(uid);
     if (!isCurrentUser()) return true;
     if (result.error) {
-      setServerReachable(false);
+      noteSyncFailure(result.failure);
       return false;
     }
 
@@ -120,7 +140,7 @@ function App() {
       const loadResult = await serverData.load(uid);
       if (!isCurrentUser()) return true;
       if (!loadResult.data || loadResult.error) {
-        setServerReachable(false);
+        noteSyncFailure(loadResult.failure);
         return false;
       }
       setData(currentData => {
@@ -144,7 +164,7 @@ function App() {
       console.warn('Failed to load shared buckets:', sharedResult.error);
     }
     return true;
-  }, [syncedUid, applySharedFromServer]);
+  }, [syncedUid, applySharedFromServer, noteSyncFailure]);
 
   // Sync with server - fetch and merge
   const syncWithServer = useCallback(async () => {
@@ -155,11 +175,11 @@ function App() {
       await pullFromServer(user.uid);
     } catch (error) {
       console.error('Sync error:', error);
-      setServerReachable(false); // Server unreachable
+      noteSyncFailure(syncFailureOf(error));
     } finally {
       isSyncingRef.current = false;
     }
-  }, [user, pullFromServer]);
+  }, [user, pullFromServer, noteSyncFailure]);
   
   // Manual refresh with visual feedback
   const handleRefresh = async () => {
@@ -180,9 +200,11 @@ function App() {
       }
     } catch (error) {
       console.error('Sync error:', error);
-      setServerReachable(false);
+      noteSyncFailure(syncFailureOf(error));
       finalStatus = 'error';
     }
+    // Also retry the save, in case that is what failed
+    setSaveNonce(n => n + 1);
     
     // Ensure minimum display time for syncing animation
     const elapsed = Date.now() - startTime;
@@ -206,6 +228,8 @@ function App() {
       // and local saves until `data` belongs to the new account.
       localOwnerRef.current = undefined;
       setSyncedUid(null);
+      setSyncProblem(null);
+      setServerReachable(true);
       setUser(firebaseUser);
       setIsAuthLoading(false);
       
@@ -242,7 +266,7 @@ function App() {
         } else {
           // Load failed: show local data but keep server saves blocked. The
           // next sync (focus, online, refresh) retries the load first.
-          setServerReachable(false);
+          noteSyncFailure(serverResult.failure);
         }
         localOwnerRef.current = firebaseUser.uid;
         setData(finalData);
@@ -272,7 +296,7 @@ function App() {
     });
 
     return () => unsubscribe();
-  }, [applySharedFromServer]);
+  }, [applySharedFromServer, noteSyncFailure]);
 
   // Save data whenever it changes (but only after initial load)
   useEffect(() => {
@@ -303,19 +327,20 @@ function App() {
           });
           serverLastModifiedRef.current = saveResult.lastModified ?? null;
           setServerReachable(true); // Server save succeeded
-        } else if (saveResult.error) {
-          console.warn('Server unreachable, data saved locally');
-          setServerReachable(false);
+          setSyncProblem(null);
+        } else {
+          console.warn('Server save failed, data saved locally:', saveResult.error);
+          noteSyncFailure(saveResult.failure);
         }
       } catch (err) {
         console.error('Failed to save to server:', err);
-        setServerReachable(false); // Server unreachable
+        noteSyncFailure(syncFailureOf(err));
         // Data is already saved to localStorage, so no data loss
       }
     }, 500); // Wait 500ms before saving to server
     
     return () => clearTimeout(timeoutId);
-  }, [data, isLoaded, user, syncedUid, isOnline]);
+  }, [data, isLoaded, user, syncedUid, isOnline, saveNonce, noteSyncFailure]);
 
   // Save shared buckets whenever they change (only buckets user has write permission on)
   useEffect(() => {
@@ -338,6 +363,7 @@ function App() {
         const result = await sharedBuckets.save(bucket.id, bucket);
         if (!result.success || !result.bucket) {
           console.error('Failed to save shared bucket:', result.error);
+          noteSyncFailure(result.failure);
           continue;
         }
         const saved = result.bucket;
@@ -353,7 +379,7 @@ function App() {
     }, 500);
     
     return () => clearTimeout(timeoutId);
-  }, [sharedBucketsData, isLoaded, user, isOnline]);
+  }, [sharedBucketsData, isLoaded, user, isOnline, noteSyncFailure]);
 
   // Cleanup auto-scroll interval on unmount
   useEffect(() => {
@@ -1417,6 +1443,11 @@ function App() {
           No Internet Connection - Changes saved locally only
         </div>
       )}
+      {isOnline && syncProblem && user && (
+        <div className="bg-red-600 text-white px-4 py-2 text-center text-sm font-medium" role="alert">
+          {syncProblem}
+        </div>
+      )}
       {isOnline && !serverReachable && user && (
         <div className="bg-orange-500 text-white px-4 py-2 text-center text-sm font-medium">
           Server Unreachable - Changes saved locally, will sync when server is available
@@ -1468,7 +1499,7 @@ function App() {
                         : 'bg-teal-600 text-white hover:bg-teal-700'
                     }`}
                     title="Sync with server"
-                    disabled={!isOnline || !serverReachable || syncStatus === 'syncing'}
+                    disabled={!isOnline || syncStatus === 'syncing'}
                   >
                     {syncStatus === 'syncing' ? (
                       <>
@@ -1497,7 +1528,7 @@ function App() {
                         <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                         </svg>
-                        {(!isOnline || !serverReachable) ? 'Offline' : 'Refresh'}
+                        {!isOnline ? 'Offline' : 'Refresh'}
                       </>
                     )}
                   </button>
@@ -1510,8 +1541,8 @@ function App() {
                       <img src={user.photoURL} alt="" className="w-5 h-5 rounded-full" />
                     )}
                     <span className="truncate max-w-[100px]">{user.displayName || user.email}</span>
-                    {isOnline && serverReachable && <span className="text-green-300">●</span>}
-                    {(!isOnline || !serverReachable) && <span className="text-red-300">●</span>}
+                    {isOnline && serverReachable && !syncProblem && <span className="text-green-300">●</span>}
+                    {(!isOnline || !serverReachable || syncProblem) && <span className="text-red-300">●</span>}
                   </button>
                 </>
               ) : (
