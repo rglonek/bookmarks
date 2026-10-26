@@ -1389,15 +1389,23 @@ function App() {
             : bucket
         );
 
-        // A signed-in library is one Firestore document; don't grow it past
-        // what can sync (a full browser export easily can).
-        const nextBytes = jsonBytes({ buckets: addTo(data.buckets) });
+        // A signed-in library, and each shared bucket, is one Firestore
+        // document; don't grow it past what can sync (a full browser export
+        // easily can).
+        const intoShared = sharedBucketsData.some(b => b.id === chromeImportBucket);
+        const nextBytes = intoShared
+          ? jsonBytes(addTo(sharedBucketsData).find(b => b.id === chromeImportBucket))
+          : jsonBytes({ buckets: addTo(data.buckets) });
         if (user && nextBytes > MAX_SYNC_BYTES) {
-          alert(`This import would make your library ${formatMegabytes(nextBytes)}, over the ${formatMegabytes(MAX_SYNC_BYTES)} that can sync. Nothing was imported. Try exporting a single folder from Chrome.`);
+          alert(`This import would make ${intoShared ? 'this shared bucket' : 'your library'} ${formatMegabytes(nextBytes)}, over the ${formatMegabytes(MAX_SYNC_BYTES)} that can sync. Nothing was imported. Try exporting a single folder from Chrome.`);
           return;
         }
 
-        setData(prev => ({ ...prev, buckets: addTo(prev.buckets) }));
+        if (intoShared) {
+          setSharedBucketsData(addTo);
+        } else {
+          setData(prev => ({ ...prev, buckets: addTo(prev.buckets) }));
+        }
 
         alert(`Successfully imported ${parsed.categories.length} categories with bookmarks!`);
         setShowChromeImportModal(false);
@@ -2238,11 +2246,13 @@ function App() {
                 required
               >
                 <option value="">-- Choose a bucket --</option>
-                {sortedBuckets.map(bucket => (
-                  <option key={bucket.id} value={bucket.id}>{bucket.name}</option>
+                {writableBuckets.map(bucket => (
+                  <option key={bucket.id} value={bucket.id}>
+                    {bucket.name}{bucket.isShared ? ' 👥' : ''}
+                  </option>
                 ))}
               </select>
-              {sortedBuckets.length === 0 && (
+              {writableBuckets.length === 0 && (
                 <p className="text-sm text-red-600 mt-1">Please create a bucket first</p>
               )}
             </div>
