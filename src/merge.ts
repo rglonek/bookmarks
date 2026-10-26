@@ -7,6 +7,116 @@ import { AppData, Bookmark, Bucket, Category } from './types';
 const tombstone = <T extends { deleted?: boolean; deletedAt?: string }>(item: T, now: string): T =>
   item.deleted ? item : { ...item, deleted: true, deletedAt: now };
 
+const TOMBSTONE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+// A rename stamps updatedAt on the bucket or category; the later stamp wins.
+// With no stamps (older data) the server's name wins, as it always has.
+function newerName(local: { name: string; updatedAt?: string }, server: { name: string; updatedAt?: string }) {
+  if (local.updatedAt && (!server.updatedAt || local.updatedAt > server.updatedAt)) {
+    return { name: local.name, updatedAt: local.updatedAt };
+  }
+  return { name: server.name, updatedAt: server.updatedAt };
+}
+
+function mergeBookmarks(local: Bookmark[], server: Bookmark[]): Bookmark[] {
+  const merged = new Map<string, Bookmark>();
+  local.forEach(bm => merged.set(bm.id, { ...bm }));
+
+  server.forEach(serverBm => {
+    const localBm = merged.get(serverBm.id);
+    if (!localBm) {
+      // Bookmark only on server
+      merged.set(serverBm.id, { ...serverBm });
+    } else if (localBm.deleted || serverBm.deleted) {
+      // If either side is deleted, mark as deleted
+      merged.set(serverBm.id, {
+        ...serverBm,
+        deleted: true,
+        deletedAt: localBm.deletedAt || serverBm.deletedAt
+      });
+    } else if (new Date(serverBm.updatedAt).getTime() > new Date(localBm.updatedAt).getTime()) {
+      // Neither deleted - use the one with latest updatedAt
+      merged.set(serverBm.id, { ...serverBm });
+    }
+  });
+
+  return Array.from(merged.values());
+}
+
+function mergeCategories(local: Category[], server: Category[]): Category[] {
+  const merged = new Map<string, Category>();
+  local.forEach(cat => merged.set(cat.id, { ...cat }));
+
+  server.forEach(serverCat => {
+    const localCat = merged.get(serverCat.id);
+    if (!localCat) {
+      // Category only on server
+      merged.set(serverCat.id, { ...serverCat });
+      return;
+    }
+    merged.set(serverCat.id, {
+      ...localCat,
+      ...newerName(localCat, serverCat),
+      bookmarks: mergeBookmarks(localCat.bookmarks ?? [], serverCat.bookmarks ?? []),
+      deleted: localCat.deleted || serverCat.deleted,
+      deletedAt: localCat.deletedAt || serverCat.deletedAt
+    });
+  });
+
+  return Array.from(merged.values());
+}
+
+/** Merge one bucket that exists on both sides. Fields other than name and
+ *  contents (such as shared-bucket metadata) come from `local`. */
+export function mergeBucket(local: Bucket, server: Bucket): Bucket {
+  return {
+    ...local,
+    ...newerName(local, server),
+    categories: mergeCategories(local.categories ?? [], server.categories ?? []),
+    deleted: local.deleted || server.deleted,
+    deletedAt: local.deletedAt || server.deletedAt
+  };
+}
+
+/**
+ * Combine two copies of a library. Everything from both sides is kept; a
+ * record deleted on either side stays deleted; for a bookmark on both sides
+ * the later updatedAt wins.
+ */
+export function mergeData(localData: AppData, serverData: AppData): AppData {
+  const merged = new Map<string, Bucket>();
+  (localData.buckets ?? []).forEach(bucket => merged.set(bucket.id, { ...bucket }));
+
+  (serverData.buckets ?? []).forEach(serverBucket => {
+    const localBucket = merged.get(serverBucket.id);
+    merged.set(serverBucket.id, localBucket ? mergeBucket(localBucket, serverBucket) : { ...serverBucket });
+  });
+
+  return { buckets: Array.from(merged.values()) };
+}
+
+/** Drop deleted records older than 30 days. */
+export function pruneTombstones(data: AppData, now: number = Date.now()): AppData {
+  const cutoff = new Date(now - TOMBSTONE_MAX_AGE_MS);
+  const keep = (item: { deleted?: boolean; deletedAt?: string }) =>
+    !(item.deleted && item.deletedAt && new Date(item.deletedAt) <= cutoff);
+
+  return {
+    ...data,
+    buckets: data.buckets
+      .filter(keep)
+      .map(bucket => ({
+        ...bucket,
+        categories: bucket.categories
+          .filter(keep)
+          .map(category => ({
+            ...category,
+            bookmarks: category.bookmarks.filter(keep)
+          }))
+      }))
+  };
+}
+
 /**
  * Replace the library with `imported` in a way that syncs: everything in
  * `current` that is missing from `imported` is kept as a deleted record.

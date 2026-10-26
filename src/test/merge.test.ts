@@ -1,70 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import type { AppData, Bucket, Category, Bookmark } from '../types';
+import type { AppData } from '../types';
+import { mergeData } from '../merge';
 
-// Extract merge logic for testing
-function mergeData(localData: AppData, serverData: AppData): AppData {
-  const mergedBuckets = new Map<string, Bucket>();
-  
-  localData.buckets.forEach(bucket => {
-    mergedBuckets.set(bucket.id, { ...bucket });
-  });
-  
-  serverData.buckets.forEach(serverBucket => {
-    if (mergedBuckets.has(serverBucket.id)) {
-      const localBucket = mergedBuckets.get(serverBucket.id)!;
-      const mergedCategories = new Map<string, Category>();
-      
-      localBucket.categories.forEach(cat => {
-        mergedCategories.set(cat.id, { ...cat });
-      });
-      
-      serverBucket.categories.forEach(serverCat => {
-        if (mergedCategories.has(serverCat.id)) {
-          const localCat = mergedCategories.get(serverCat.id)!;
-          const mergedBookmarks = new Map<string, Bookmark>();
-          
-          localCat.bookmarks.forEach(bm => {
-            mergedBookmarks.set(bm.id, { ...bm });
-          });
-          
-          serverCat.bookmarks.forEach(serverBm => {
-            if (mergedBookmarks.has(serverBm.id)) {
-              const localBm = mergedBookmarks.get(serverBm.id)!;
-              const localTime = new Date(localBm.updatedAt).getTime();
-              const serverTime = new Date(serverBm.updatedAt).getTime();
-              
-              if (serverTime > localTime) {
-                mergedBookmarks.set(serverBm.id, { ...serverBm });
-              }
-            } else {
-              mergedBookmarks.set(serverBm.id, { ...serverBm });
-            }
-          });
-          
-          mergedCategories.set(serverCat.id, {
-            ...localCat,
-            name: serverCat.name,
-            bookmarks: Array.from(mergedBookmarks.values())
-          });
-        } else {
-          mergedCategories.set(serverCat.id, { ...serverCat });
-        }
-      });
-      
-      mergedBuckets.set(serverBucket.id, {
-        ...localBucket,
-        name: serverBucket.name,
-        categories: Array.from(mergedCategories.values())
-      });
-    } else {
-      mergedBuckets.set(serverBucket.id, { ...serverBucket });
-    }
-  });
-  
-  return {
-    buckets: Array.from(mergedBuckets.values())
-  };
-}
 
 describe('Merge Logic', () => {
   describe('mergeData', () => {

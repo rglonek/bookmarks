@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { AppData, Bucket, Category, Bookmark, SharedOwner, SharePermission } from './types';
 import { storage, createBucket, createCategory, createBookmark, generateId } from './storage';
-import { replaceLibrary } from './merge';
+import { mergeData, pruneTombstones, replaceLibrary } from './merge';
 import { extractMetadata, auth, serverData, sharedBuckets, userProfile } from './api';
 import { User } from 'firebase/auth';
 
@@ -61,7 +61,9 @@ function App() {
   const [authError, setAuthError] = useState<string | null>(null);
   
   // Sync state
-  const [serverLastModified, setServerLastModified] = useState<string | null>(null);
+  // Change marker of the server copy this device last saw. A ref, not state:
+  // nothing renders from it, and changing it shouldn't restart the sync loop.
+  const serverLastModifiedRef = useRef<string | null>(null);
   // uid whose server data has been merged into `data`. Nothing is saved to the
   // server until this matches the signed-in user, so a fresh sign-in can't
   // overwrite the cloud library with whatever happened to be in local storage.
@@ -85,110 +87,6 @@ function App() {
   const autoScrollIntervalRef = useRef<number | null>(null);
   const scrollDirectionRef = useRef<'up' | 'down' | null>(null);
 
-  // Merge function - combines local and server data intelligently
-  // Handles soft deletes: if either side has deleted=true, the merged result is deleted
-  const mergeData = useCallback((localData: AppData, serverDataObj: AppData): AppData => {
-    // Create maps for quick lookup
-    const mergedBuckets = new Map<string, Bucket>();
-    
-    // First, add all local buckets
-    localData.buckets.forEach(bucket => {
-      mergedBuckets.set(bucket.id, { ...bucket });
-    });
-    
-    // Then merge in server buckets
-    serverDataObj.buckets.forEach(serverBucket => {
-      if (mergedBuckets.has(serverBucket.id)) {
-        // Bucket exists in both - merge categories
-        const localBucket = mergedBuckets.get(serverBucket.id)!;
-        
-        // Check if bucket is deleted on either side
-        const bucketDeleted = localBucket.deleted || serverBucket.deleted;
-        const bucketDeletedAt = localBucket.deletedAt || serverBucket.deletedAt;
-        
-        const mergedCategories = new Map<string, Category>();
-        
-        // Add local categories
-        localBucket.categories.forEach(cat => {
-          mergedCategories.set(cat.id, { ...cat });
-        });
-        
-        // Merge server categories
-        serverBucket.categories.forEach(serverCat => {
-          if (mergedCategories.has(serverCat.id)) {
-            // Category exists in both - merge bookmarks
-            const localCat = mergedCategories.get(serverCat.id)!;
-            
-            // Check if category is deleted on either side
-            const catDeleted = localCat.deleted || serverCat.deleted;
-            const catDeletedAt = localCat.deletedAt || serverCat.deletedAt;
-            
-            const mergedBookmarks = new Map<string, Bookmark>();
-            
-            // Add local bookmarks
-            localCat.bookmarks.forEach(bm => {
-              mergedBookmarks.set(bm.id, { ...bm });
-            });
-            
-            // Merge server bookmarks
-            serverCat.bookmarks.forEach(serverBm => {
-              if (mergedBookmarks.has(serverBm.id)) {
-                // Bookmark exists in both
-                const localBm = mergedBookmarks.get(serverBm.id)!;
-                
-                // If either side is deleted, mark as deleted
-                if (localBm.deleted || serverBm.deleted) {
-                  mergedBookmarks.set(serverBm.id, {
-                    ...serverBm,
-                    deleted: true,
-                    deletedAt: localBm.deletedAt || serverBm.deletedAt
-                  });
-                } else {
-                  // Neither deleted - use the one with latest updatedAt
-                  const localTime = new Date(localBm.updatedAt).getTime();
-                  const serverTime = new Date(serverBm.updatedAt).getTime();
-                  
-                  if (serverTime > localTime) {
-                    mergedBookmarks.set(serverBm.id, { ...serverBm });
-                  }
-                  // else keep local (already set)
-                }
-              } else {
-                // Bookmark only on server
-                mergedBookmarks.set(serverBm.id, { ...serverBm });
-              }
-            });
-            
-            mergedCategories.set(serverCat.id, {
-              ...localCat,
-              name: serverCat.name, // Use server name for category
-              bookmarks: Array.from(mergedBookmarks.values()),
-              deleted: catDeleted,
-              deletedAt: catDeletedAt
-            });
-          } else {
-            // Category only on server
-            mergedCategories.set(serverCat.id, { ...serverCat });
-          }
-        });
-        
-        mergedBuckets.set(serverBucket.id, {
-          ...localBucket,
-          name: serverBucket.name, // Use server name for bucket
-          categories: Array.from(mergedCategories.values()),
-          deleted: bucketDeleted,
-          deletedAt: bucketDeletedAt
-        });
-      } else {
-        // Bucket only on server
-        mergedBuckets.set(serverBucket.id, { ...serverBucket });
-      }
-    });
-    
-    return {
-      buckets: Array.from(mergedBuckets.values())
-    };
-  }, []);
   
   // Fetch server data and merge it into local state. The first pull for a
   // user always loads, even if the timestamps match, so that a failed initial
@@ -203,7 +101,7 @@ function App() {
       return false;
     }
 
-    if (result.lastModified !== serverLastModified || syncedUid !== uid) {
+    if (result.lastModified !== serverLastModifiedRef.current || syncedUid !== uid) {
       const loadResult = await serverData.load(uid);
       if (!isCurrentUser()) return true;
       if (!loadResult.data || loadResult.error) {
@@ -211,11 +109,13 @@ function App() {
         return false;
       }
       setData(currentData => {
-        const merged = mergeData(currentData, loadResult.data!);
+        const merged = pruneTombstones(mergeData(currentData, loadResult.data!));
+        // Same content: keep the current object so nothing re-renders or re-saves
+        if (JSON.stringify(merged) === JSON.stringify(currentData)) return currentData;
         storage.save(merged, uid);
         return merged;
       });
-      setServerLastModified(loadResult.lastModified || null);
+      serverLastModifiedRef.current = loadResult.lastModified || null;
       setSyncedUid(uid);
     }
     setServerReachable(true);
@@ -229,7 +129,7 @@ function App() {
       console.warn('Failed to load shared buckets:', sharedResult.error);
     }
     return true;
-  }, [serverLastModified, syncedUid, mergeData]);
+  }, [syncedUid]);
 
   // Sync with server - fetch and merge
   const syncWithServer = useCallback(async () => {
@@ -321,8 +221,8 @@ function App() {
         let finalData = localData;
         if (serverResult.data && !serverResult.error) {
           // Merge server and local data
-          finalData = mergeData(localData, serverResult.data);
-          setServerLastModified(serverResult.lastModified || null);
+          finalData = pruneTombstones(mergeData(localData, serverResult.data));
+          serverLastModifiedRef.current = serverResult.lastModified || null;
           storage.save(finalData, firebaseUser.uid); // Save merged data locally
           setSyncedUid(firebaseUser.uid);
         } else {
@@ -357,7 +257,6 @@ function App() {
     });
 
     return () => unsubscribe();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Save data whenever it changes (but only after initial load)
@@ -371,17 +270,23 @@ function App() {
     }
     
     // Also save to server if authenticated and online, but only once this
-    // user's server data has been loaded and merged into `data`
-    if (!user || syncedUid !== user.uid || isSyncingRef.current || !isOnline) return;
+    // user's server data has been loaded and merged into `data`. The save
+    // merges with the server copy, so it is safe while a sync is running.
+    if (!user || syncedUid !== user.uid || !isOnline) return;
     
     // Debounce server saves to avoid too many requests
     const timeoutId = setTimeout(async () => {
-      if (isSyncingRef.current) return; // Check again after timeout
-      
       try {
         const saveResult = await serverData.save(user.uid, data);
-        if (!saveResult.error && saveResult.lastModified) {
-          setServerLastModified(saveResult.lastModified);
+        if (saveResult.success && saveResult.data) {
+          // Take in anything the server had that this device didn't, such as
+          // a bookmark saved from the Chrome extension or another device.
+          const serverCopy = saveResult.data;
+          setData(current => {
+            const next = mergeData(current, serverCopy);
+            return JSON.stringify(next) === JSON.stringify(current) ? current : next;
+          });
+          serverLastModifiedRef.current = saveResult.lastModified ?? null;
           setServerReachable(true); // Server save succeeded
         } else if (saveResult.error) {
           console.warn('Server unreachable, data saved locally');
@@ -939,24 +844,27 @@ function App() {
   };
 
   const renameBucket = (bucketId: string, newName: string) => {
+    // The stamp makes this rename win over an older name when copies merge
+    const updatedAt = new Date().toISOString();
     // Check if this is a shared bucket
     const isSharedBucket = sharedBucketsData.some(b => b.id === bucketId);
     
     if (isSharedBucket) {
       setSharedBucketsData(prev => prev.map(bucket =>
-        bucket.id === bucketId ? { ...bucket, name: newName } : bucket
+        bucket.id === bucketId ? { ...bucket, name: newName, updatedAt } : bucket
       ));
     } else {
       setData(prev => ({
         ...prev,
         buckets: prev.buckets.map(bucket =>
-          bucket.id === bucketId ? { ...bucket, name: newName } : bucket
+          bucket.id === bucketId ? { ...bucket, name: newName, updatedAt } : bucket
         )
       }));
     }
   };
 
   const renameCategory = (bucketId: string, categoryId: string, newName: string) => {
+    const updatedAt = new Date().toISOString();
     // Check if this is a shared bucket
     const isSharedBucket = sharedBucketsData.some(b => b.id === bucketId);
     
@@ -965,7 +873,7 @@ function App() {
         ? {
             ...bucket,
             categories: bucket.categories.map(category =>
-              category.id === categoryId ? { ...category, name: newName } : category
+              category.id === categoryId ? { ...category, name: newName, updatedAt } : category
             )
           }
         : bucket
@@ -980,40 +888,7 @@ function App() {
 
   // Clean up tombstones older than 30 days
   const cleanupOldTombstones = useCallback(() => {
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    
-    setData(prev => ({
-      ...prev,
-      buckets: prev.buckets
-        .filter(bucket => {
-          // Remove buckets deleted more than 30 days ago
-          if (bucket.deleted && bucket.deletedAt) {
-            return new Date(bucket.deletedAt) > thirtyDaysAgo;
-          }
-          return true;
-        })
-        .map(bucket => ({
-          ...bucket,
-          categories: bucket.categories
-            .filter(category => {
-              // Remove categories deleted more than 30 days ago
-              if (category.deleted && category.deletedAt) {
-                return new Date(category.deletedAt) > thirtyDaysAgo;
-              }
-              return true;
-            })
-            .map(category => ({
-              ...category,
-              bookmarks: category.bookmarks.filter(bookmark => {
-                // Remove bookmarks deleted more than 30 days ago
-                if (bookmark.deleted && bookmark.deletedAt) {
-                  return new Date(bookmark.deletedAt) > thirtyDaysAgo;
-                }
-                return true;
-              })
-            }))
-        }))
-    }));
+    setData(prev => pruneTombstones(prev));
   }, []);
   
   // Clean up old tombstones on mount and daily
@@ -1260,7 +1135,7 @@ function App() {
     }
 
     await auth.signOut();
-    setServerLastModified(null);
+    serverLastModifiedRef.current = null;
   };
 
   const exportData = () => {

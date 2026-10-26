@@ -15,6 +15,7 @@ export interface Category {
   id: string;
   name: string;
   bookmarks: Bookmark[];
+  updatedAt?: string;   // Set when renamed; the later rename wins on merge
   deleted?: boolean;
   deletedAt?: string;
 }
@@ -32,6 +33,7 @@ export interface Bucket {
   id: string;
   name: string;
   categories: Category[];
+  updatedAt?: string;   // Set when renamed; the later rename wins on merge
   deleted?: boolean;
   deletedAt?: string;
   // Shared bucket fields

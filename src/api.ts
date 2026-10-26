@@ -19,8 +19,10 @@ import {
   where,
   getDocs,
   arrayUnion,
-  arrayRemove
+  arrayRemove,
+  runTransaction
 } from 'firebase/firestore';
+import { mergeData, pruneTombstones } from './merge';
 import { httpsCallable } from 'firebase/functions';
 
 export interface MetadataResponse {
@@ -103,20 +105,37 @@ export const auth = {
 };
 
 // Firestore data storage API
+const libraryDoc = (userId: string) => doc(db, 'users', userId, 'data', 'bookmarks');
+
+function asAppData(value: unknown): AppData {
+  if (value && typeof value === 'object' && Array.isArray((value as AppData).buckets)) {
+    return value as AppData;
+  }
+  return { buckets: [] };
+}
+
+// Marker for "has the server copy changed since I last saw it". Every writer
+// (this app and the Chrome extension) stamps updatedAt with an ISO time, and a
+// save returns the stamp it wrote, so this device's own save doesn't look like
+// a remote change. Older documents only have the server timestamp.
+function changeMarker(docData: Record<string, unknown>): string | null {
+  if (typeof docData.updatedAt === 'string') return docData.updatedAt;
+  const lastModified = docData.lastModified;
+  if (lastModified instanceof Timestamp) return lastModified.toDate().toISOString();
+  return typeof lastModified === 'string' ? lastModified : null;
+}
+
 export const serverData = {
   // Load user data from Firestore
   async load(userId: string): Promise<{ data?: AppData; lastModified?: string | null; error?: string }> {
     try {
-      const docRef = doc(db, 'users', userId, 'data', 'bookmarks');
-      const docSnap = await getDoc(docRef);
+      const docSnap = await getDoc(libraryDoc(userId));
 
       if (docSnap.exists()) {
         const docData = docSnap.data();
         return {
-          data: docData.data as AppData,
-          lastModified: docData.lastModified instanceof Timestamp 
-            ? docData.lastModified.toDate().toISOString()
-            : docData.lastModified || null
+          data: asAppData(docData.data),
+          lastModified: changeMarker(docData)
         };
       }
 
@@ -131,23 +150,31 @@ export const serverData = {
     }
   },
 
-  // Save user data to Firestore
-  async save(userId: string, data: AppData): Promise<{ success: boolean; lastModified?: string; error?: string }> {
+  // Save user data to Firestore. The save merges with the server copy inside a
+  // transaction instead of overwriting it, so changes saved elsewhere since
+  // this device last pulled (another device, the Chrome extension) are kept.
+  // Returns the merged library that was written.
+  async save(userId: string, data: AppData): Promise<{ success: boolean; data?: AppData; lastModified?: string; error?: string }> {
     try {
-      const docRef = doc(db, 'users', userId, 'data', 'bookmarks');
+      const docRef = libraryDoc(userId);
       const now = new Date().toISOString();
-      
-      // Clean data to remove undefined values (Firestore doesn't accept undefined)
-      const cleanData = JSON.parse(JSON.stringify(data));
-      
-      await setDoc(docRef, {
-        data: cleanData,
-        lastModified: serverTimestamp(),
-        updatedAt: now
+
+      const merged = await runTransaction(db, async (transaction) => {
+        const docSnap = await transaction.get(docRef);
+        const serverCopy = docSnap.exists() ? asAppData(docSnap.data().data) : { buckets: [] };
+        const result = pruneTombstones(mergeData(data, serverCopy));
+        transaction.set(docRef, {
+          // Remove undefined values (Firestore doesn't accept undefined)
+          data: JSON.parse(JSON.stringify(result)),
+          lastModified: serverTimestamp(),
+          updatedAt: now
+        });
+        return result;
       });
 
       return { 
         success: true, 
+        data: merged,
         lastModified: now 
       };
     } catch (error) {
@@ -159,19 +186,8 @@ export const serverData = {
   // Check last modified timestamp
   async check(userId: string): Promise<{ lastModified?: string | null; error?: string }> {
     try {
-      const docRef = doc(db, 'users', userId, 'data', 'bookmarks');
-      const docSnap = await getDoc(docRef);
-
-      if (docSnap.exists()) {
-        const docData = docSnap.data();
-        return {
-          lastModified: docData.lastModified instanceof Timestamp 
-            ? docData.lastModified.toDate().toISOString()
-            : docData.lastModified || null
-        };
-      }
-
-      return { lastModified: null };
+      const docSnap = await getDoc(libraryDoc(userId));
+      return { lastModified: docSnap.exists() ? changeMarker(docSnap.data()) : null };
     } catch (error) {
       console.error('Error checking data:', error);
       return { error: 'Failed to check data' };
