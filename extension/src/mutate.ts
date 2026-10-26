@@ -143,44 +143,35 @@ export function applySave(original: AppData, input: SaveInput): SaveResult {
 
   const data = JSON.parse(JSON.stringify({ buckets })) as AppData;
 
+  // "New" bucket and category names reuse a live one with the same name, so a
+  // popup that couldn't see it (stale view, failed load) doesn't add a second
+  // "Inbox". This runs inside the save transaction, on the latest data.
+  let bucket: Bucket | undefined;
   if (input.mode === 'new-bucket') {
     const bucketName = cleanName(input.bucketName, 'Inbox');
-    const categoryName = cleanName(input.categoryName, 'Unsorted');
-    const category = createCategory(categoryName);
-    category.bookmarks = [input.bookmark];
-    const bucket = createBucket(bucketName);
-    bucket.categories = [category];
-    data.buckets = [...data.buckets, bucket];
-    return {
-      status: 'added',
-      data,
-      bucketId: bucket.id,
-      categoryId: category.id,
-      bucketName,
-      categoryName,
-    };
+    bucket = data.buckets.find((item) => !item.deleted && sameName(item.name, bucketName));
+    if (!bucket) {
+      bucket = createBucket(bucketName);
+      data.buckets = [...data.buckets, bucket];
+    }
+  } else {
+    bucket = data.buckets.find((item) => item.id === input.bucketId && !item.deleted);
   }
-
-  const bucket = data.buckets.find((item) => item.id === input.bucketId && !item.deleted);
   if (!bucket) return { status: 'missing' };
 
-  if (input.mode === 'new-category') {
+  let category: Category | undefined;
+  if (input.mode === 'existing') {
+    category = (bucket.categories ?? []).find((item) => item.id === input.categoryId && !item.deleted);
+    if (!category) return { status: 'missing' };
+  } else {
     const categoryName = cleanName(input.categoryName, 'Unsorted');
-    const category = createCategory(categoryName);
-    category.bookmarks = [input.bookmark];
-    bucket.categories = [...(bucket.categories ?? []), category];
-    return {
-      status: 'added',
-      data,
-      bucketId: bucket.id,
-      categoryId: category.id,
-      bucketName: bucket.name,
-      categoryName,
-    };
+    category = (bucket.categories ?? []).find((item) => !item.deleted && sameName(item.name, categoryName));
+    if (!category) {
+      category = createCategory(categoryName);
+      bucket.categories = [...(bucket.categories ?? []), category];
+    }
   }
 
-  const category = (bucket.categories ?? []).find((item) => item.id === input.categoryId && !item.deleted);
-  if (!category) return { status: 'missing' };
   category.bookmarks = [...(category.bookmarks ?? []), input.bookmark];
   return {
     status: 'added',
@@ -191,6 +182,8 @@ export function applySave(original: AppData, input: SaveInput): SaveResult {
     categoryName: category.name,
   };
 }
+
+const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
 
 function cleanName(name: string, fallback: string): string {
   const trimmed = name.trim();

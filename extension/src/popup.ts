@@ -77,6 +77,9 @@ let viewToken = 0;
 let saving = false;
 let currentUser: User | null = null;
 let library: Library = emptyLibrary();
+// False when the library couldn't be loaded; saving is blocked then, since
+// the popup can't tell which buckets exist
+let libraryLoaded = false;
 let page: PageInfo | null = null;
 
 function init(): void {
@@ -136,6 +139,7 @@ function showSignedOut(): void {
   viewToken += 1;
   currentUser = null;
   library = emptyLibrary();
+  libraryLoaded = false;
   loading.hidden = true;
   signedIn.hidden = true;
   signedOut.hidden = false;
@@ -183,12 +187,15 @@ async function showSignedIn(user: User): Promise<void> {
     ? pageResult.value
     : { url: '', title: 'This page', description: '', saveable: false, reason: 'Could not read the current tab.' };
   library = libraryResult.status === 'fulfilled' ? libraryResult.value : emptyLibrary();
+  libraryLoaded = libraryResult.status === 'fulfilled';
   const prefs = prefsResult.status === 'fulfilled' ? prefsResult.value : {};
 
   renderPage();
   renderDestination(prefs);
   renderList();
-  if (libraryResult.status === 'rejected') setStatus(friendlySaveError(libraryResult.reason), 'error');
+  if (libraryResult.status === 'rejected') {
+    setStatus(`Couldn't load your library: ${friendlySaveError(libraryResult.reason)} Close and reopen the popup to try again.`, 'error');
+  }
 }
 
 function renderPage(): void {
@@ -198,8 +205,8 @@ function renderPage(): void {
   pageUrl.hidden = !page.url;
   pageReason.hidden = page.saveable;
   pageReason.textContent = page.reason ?? '';
-  destination.hidden = !page.saveable;
-  saveButton.disabled = !page.saveable || saving;
+  destination.hidden = !page.saveable || !libraryLoaded;
+  saveButton.disabled = !page.saveable || !libraryLoaded || saving;
 }
 
 function renderDestination(prefs: Prefs): void {
@@ -288,7 +295,7 @@ function bookmarkRow(item: ListedBookmark): HTMLLIElement {
 }
 
 async function onSave(): Promise<void> {
-  if (saving || !currentUser || !page?.saveable) return;
+  if (saving || !currentUser || !page?.saveable || !libraryLoaded) return;
   const input = readDestination();
   if (!input) {
     setStatus('Choose a bucket and category.', 'error');
@@ -339,7 +346,7 @@ async function onSave(): Promise<void> {
     setStatus(friendlySaveError(error), 'error');
   } finally {
     saving = false;
-    saveButton.disabled = !page?.saveable;
+    saveButton.disabled = !page?.saveable || !libraryLoaded;
   }
 }
 

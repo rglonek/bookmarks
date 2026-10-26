@@ -225,3 +225,60 @@ describe('shared buckets', () => {
       .toEqual({ bucketName: 'Board', categoryName: 'Links' });
   });
 });
+
+describe('applySave with new names', () => {
+  it('reuses a bucket and category with the same name instead of adding a second Inbox', () => {
+    const data: AppData = {
+      buckets: [{ id: 'inbox', name: 'Inbox', categories: [{ id: 'unsorted', name: 'Unsorted', bookmarks: [] }] }],
+    };
+    const result = applySave(data, {
+      mode: 'new-bucket',
+      bucketName: ' inbox ',
+      categoryName: 'UNSORTED',
+      bookmark: bookmark({ id: 'bm-new', url: 'https://example.com/new' }),
+    });
+    expect(result.status).toBe('added');
+    if (result.status !== 'added') return;
+    expect(result.data.buckets).toHaveLength(1);
+    expect(result).toMatchObject({ bucketId: 'inbox', categoryId: 'unsorted', bucketName: 'Inbox', categoryName: 'Unsorted' });
+    expect(result.data.buckets[0].categories[0].bookmarks.map((item) => item.id)).toEqual(['bm-new']);
+  });
+
+  it('adds a category to the existing bucket when only the bucket name matches', () => {
+    const data: AppData = { buckets: [{ id: 'inbox', name: 'Inbox', categories: [] }] };
+    const result = applySave(data, {
+      mode: 'new-bucket',
+      bucketName: 'Inbox',
+      categoryName: 'Later',
+      bookmark: bookmark({ id: 'bm-new', url: 'https://example.com/new' }),
+    });
+    if (result.status !== 'added') throw new Error(result.status);
+    expect(result.data.buckets).toHaveLength(1);
+    expect(result.data.buckets[0].categories.map((c) => c.name)).toEqual(['Later']);
+  });
+
+  it('does not reuse a deleted bucket', () => {
+    const data: AppData = { buckets: [{ id: 'old', name: 'Inbox', categories: [], deleted: true }] };
+    const result = applySave(data, {
+      mode: 'new-bucket',
+      bucketName: 'Inbox',
+      categoryName: 'Unsorted',
+      bookmark: bookmark({ id: 'bm-new', url: 'https://example.com/new' }),
+    });
+    if (result.status !== 'added') throw new Error(result.status);
+    expect(result.bucketId).not.toBe('old');
+    expect(result.data.buckets).toHaveLength(2);
+  });
+
+  it('reuses a same-named category when asked for a new one', () => {
+    const result = applySave(library(), {
+      mode: 'new-category',
+      bucketId: 'bucket-work',
+      categoryName: 'dev',
+      bookmark: bookmark({ id: 'bm-new', url: 'https://example.com/new' }),
+    });
+    if (result.status !== 'added') throw new Error(result.status);
+    expect(result.categoryId).toBe('cat-dev');
+    expect(result.data.buckets[0].categories.filter((c) => !c.deleted)).toHaveLength(1);
+  });
+});
