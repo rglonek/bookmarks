@@ -7,15 +7,13 @@ const { createCanvas } = require('canvas');
 const fs = require('fs');
 const path = require('path');
 
-const sizes = [192, 512];
-const outputDir = path.join(__dirname, '..', 'public', 'icons');
+// PWA icons go in public/icons; the Chrome extension's toolbar icons in extension/icons
+const targets = [
+  { sizes: [192, 512], outputDir: path.join(__dirname, '..', 'public', 'icons') },
+  { sizes: [16, 32, 48, 128], outputDir: path.join(__dirname, '..', 'extension', 'icons') },
+];
 
-// Ensure output directory exists
-if (!fs.existsSync(outputDir)) {
-  fs.mkdirSync(outputDir, { recursive: true });
-}
-
-function generateIcon(size) {
+function generateIcon(size, outputDir) {
   const canvas = createCanvas(size, size);
   const ctx = canvas.getContext('2d');
 
@@ -81,6 +79,9 @@ function generateIcon(size) {
 }
 
 // Generate all sizes
-sizes.forEach(generateIcon);
+for (const { sizes, outputDir } of targets) {
+  fs.mkdirSync(outputDir, { recursive: true });
+  sizes.forEach(size => generateIcon(size, outputDir));
+}
 console.log('Done! Icons generated successfully.');
 
