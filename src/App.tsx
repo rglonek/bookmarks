@@ -61,8 +61,14 @@ function App() {
   
   // Sync state
   const [serverLastModified, setServerLastModified] = useState<string | null>(null);
+  // uid whose server data has been merged into `data`. Nothing is saved to the
+  // server until this matches the signed-in user, so a fresh sign-in can't
+  // overwrite the cloud library with whatever happened to be in local storage.
+  const [syncedUid, setSyncedUid] = useState<string | null>(null);
   const syncIntervalRef = useRef<number | null>(null);
   const isSyncingRef = useRef(false);
+  // Bumped on every auth change so a slow load for an earlier user is ignored.
+  const authSeqRef = useRef(0);
   
   // Network state
   const [isOnline, setIsOnline] = useState(navigator.onLine);
@@ -180,45 +186,61 @@ function App() {
     };
   }, []);
   
+  // Fetch server data and merge it into local state. The first pull for a
+  // user always loads, even if the timestamps match, so that a failed initial
+  // load is retried. Returns false if the server could not be reached.
+  const pullFromServer = useCallback(async (uid: string): Promise<boolean> => {
+    const isCurrentUser = () => auth.getCurrentUser()?.uid === uid;
+
+    const result = await serverData.check(uid);
+    if (!isCurrentUser()) return true;
+    if (result.error) {
+      setServerReachable(false);
+      return false;
+    }
+
+    if (result.lastModified !== serverLastModified || syncedUid !== uid) {
+      const loadResult = await serverData.load(uid);
+      if (!isCurrentUser()) return true;
+      if (!loadResult.data || loadResult.error) {
+        setServerReachable(false);
+        return false;
+      }
+      setData(currentData => {
+        const merged = mergeData(currentData, loadResult.data!);
+        storage.save(merged);
+        return merged;
+      });
+      setServerLastModified(loadResult.lastModified || null);
+      setSyncedUid(uid);
+    }
+    setServerReachable(true);
+
+    // Also refresh shared buckets. Don't fail the whole sync if this fails.
+    const sharedResult = await sharedBuckets.loadAll(uid);
+    if (!isCurrentUser()) return true;
+    if (!sharedResult.error) {
+      setSharedBucketsData(sharedResult.buckets);
+    } else {
+      console.warn('Failed to load shared buckets:', sharedResult.error);
+    }
+    return true;
+  }, [serverLastModified, syncedUid, mergeData]);
+
   // Sync with server - fetch and merge
   const syncWithServer = useCallback(async () => {
     if (!user || isSyncingRef.current) return;
     
     isSyncingRef.current = true;
     try {
-      const result = await serverData.check(user.uid);
-      
-      if (!result.error && result.lastModified !== serverLastModified) {
-        // Server has changes, fetch and merge
-        const loadResult = await serverData.load(user.uid);
-        
-        if (loadResult.data && !loadResult.error) {
-          setData(currentData => {
-            const merged = mergeData(currentData, loadResult.data!);
-            storage.save(merged);
-            return merged;
-          });
-          setServerLastModified(loadResult.lastModified || null);
-          setServerReachable(true); // Server is reachable
-        }
-      } else if (result.error) {
-        setServerReachable(false); // Server unreachable
-      } else {
-        setServerReachable(true); // Server is reachable
-      }
-      
-      // Also refresh shared buckets
-      const sharedResult = await sharedBuckets.loadAll(user.uid);
-      if (!sharedResult.error) {
-        setSharedBucketsData(sharedResult.buckets);
-      }
+      await pullFromServer(user.uid);
     } catch (error) {
       console.error('Sync error:', error);
       setServerReachable(false); // Server unreachable
     } finally {
       isSyncingRef.current = false;
     }
-  }, [user, serverLastModified, mergeData]);
+  }, [user, pullFromServer]);
   
   // Manual refresh with visual feedback
   const handleRefresh = async () => {
@@ -234,35 +256,8 @@ function App() {
     let finalStatus: 'success' | 'error' = 'success';
     
     try {
-      const result = await serverData.check(user.uid);
-      
-      if (!result.error && result.lastModified !== serverLastModified) {
-        // Server has changes, fetch and merge
-        const loadResult = await serverData.load(user.uid);
-        
-        if (loadResult.data && !loadResult.error) {
-          setData(currentData => {
-            const merged = mergeData(currentData, loadResult.data!);
-            storage.save(merged);
-            return merged;
-          });
-          setServerLastModified(loadResult.lastModified || null);
-          setServerReachable(true);
-        }
-      } else if (result.error) {
-        setServerReachable(false);
+      if (!(await pullFromServer(user.uid))) {
         finalStatus = 'error';
-      } else {
-        setServerReachable(true);
-      }
-      
-      // Also refresh shared buckets
-      const sharedResult = await sharedBuckets.loadAll(user.uid);
-      if (!sharedResult.error) {
-        setSharedBucketsData(sharedResult.buckets);
-      } else if (sharedResult.error) {
-        // Don't fail the whole sync if shared buckets fail
-        console.warn('Failed to load shared buckets:', sharedResult.error);
       }
     } catch (error) {
       console.error('Sync error:', error);
@@ -285,37 +280,47 @@ function App() {
   // Firebase Auth state listener
   useEffect(() => {
     const unsubscribe = auth.onAuthStateChanged(async (firebaseUser) => {
+      const seq = ++authSeqRef.current;
+      const isCurrent = () => seq === authSeqRef.current;
+
+      // Block server saves until this user's server data has been merged in.
+      setSyncedUid(null);
       setUser(firebaseUser);
       setIsAuthLoading(false);
       
       if (firebaseUser) {
-        // Register user's email for sharing lookup
-        await userProfile.registerEmail(firebaseUser);
+        // Register user's email for sharing lookup. Not awaited: the data
+        // load below shouldn't wait on two extra writes.
+        void userProfile.registerEmail(firebaseUser);
         
         // User is signed in - load and merge data
         const localData = storage.load();
-        const serverResult = await serverData.load(firebaseUser.uid);
+        const [serverResult, sharedResult] = await Promise.all([
+          serverData.load(firebaseUser.uid),
+          sharedBuckets.loadAll(firebaseUser.uid),
+        ]);
+        if (!isCurrent()) return;
         
-        // Also load shared buckets
-        const sharedResult = await sharedBuckets.loadAll(firebaseUser.uid);
         if (!sharedResult.error) {
           setSharedBucketsData(sharedResult.buckets);
         }
         
+        let finalData = localData;
         if (serverResult.data && !serverResult.error) {
           // Merge server and local data
-          const merged = mergeData(localData, serverResult.data);
-          setData(merged);
+          finalData = mergeData(localData, serverResult.data);
           setServerLastModified(serverResult.lastModified || null);
-          storage.save(merged); // Save merged data locally
+          storage.save(finalData); // Save merged data locally
+          setSyncedUid(firebaseUser.uid);
         } else {
-          // Fallback to local storage
-          setData(localData);
+          // Load failed: show local data but keep server saves blocked. The
+          // next sync (focus, online, refresh) retries the load first.
+          setServerReachable(false);
         }
+        setData(finalData);
         setIsLoaded(true);
         
         // Select first bucket if none selected (including shared buckets)
-        const finalData = serverResult.data ? mergeData(localData, serverResult.data) : localData;
         const allBucketsForSelection = [...finalData.buckets.filter(b => !b.deleted), ...sharedResult.buckets.filter(b => !b.deleted)];
         if (allBucketsForSelection.length > 0) {
           setSelectedBucket(allBucketsForSelection[0].id);
@@ -347,8 +352,9 @@ function App() {
     // Always save to localStorage (offline-first) - only personal buckets
     storage.save(data);
     
-    // Also save to server if authenticated and online
-    if (!user || isSyncingRef.current || !isOnline) return;
+    // Also save to server if authenticated and online, but only once this
+    // user's server data has been loaded and merged into `data`
+    if (!user || syncedUid !== user.uid || isSyncingRef.current || !isOnline) return;
     
     // Debounce server saves to avoid too many requests
     const timeoutId = setTimeout(async () => {
@@ -371,7 +377,7 @@ function App() {
     }, 500); // Wait 500ms before saving to server
     
     return () => clearTimeout(timeoutId);
-  }, [data, isLoaded, user, isOnline]);
+  }, [data, isLoaded, user, syncedUid, isOnline]);
 
   // Save shared buckets whenever they change (only buckets user has write permission on)
   useEffect(() => {
