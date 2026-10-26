@@ -32,7 +32,6 @@ function App() {
   const [searchBucket, setSearchBucket] = useState<string>('all');
   const [searchCategory, setSearchCategory] = useState<string>('all');
   const [searchTag, setSearchTag] = useState<string>('all');
-  const [isExtracting, setIsExtracting] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [renamingBucket, setRenamingBucket] = useState<string | null>(null);
   const [renamingCategory, setRenamingCategory] = useState<string | null>(null);
@@ -2076,17 +2075,13 @@ function App() {
           currentBucketId={currentBucket.id}
           currentCategoryId={currentCategory.id}
           allBuckets={writableBuckets}
-          isExtracting={isExtracting}
           isAuthenticated={!!user}
           onExtract={async (url) => {
             if (!user) {
               // If not authenticated, return empty (metadata extraction requires auth)
               return { title: '', description: '' };
             }
-            setIsExtracting(true);
-            const metadata = await extractMetadata(url);
-            setIsExtracting(false);
-            return metadata;
+            return extractMetadata(url);
           }}
           onSave={(bookmarkData, targetBucketId, targetCategoryId) => {
             const isCurrentShared = sharedBucketsData.some(b => b.id === currentBucket.id);
@@ -2608,13 +2603,15 @@ function BookmarkCard({
   );
 }
 
+// How long the URL field must sit still before its metadata is looked up
+const EXTRACT_DELAY_MS = 600;
+
 // Bookmark Modal Component
 function BookmarkModal({
   bookmark,
   currentBucketId,
   currentCategoryId,
   allBuckets,
-  isExtracting,
   isAuthenticated,
   onExtract,
   onSave,
@@ -2624,7 +2621,6 @@ function BookmarkModal({
   currentBucketId: string;
   currentCategoryId: string;
   allBuckets: Bucket[];
-  isExtracting: boolean;
   isAuthenticated: boolean;
   onExtract: (url: string) => Promise<{ title: string; description: string }>;
   onSave: (data: Omit<Bookmark, 'id' | 'createdAt' | 'updatedAt'>, bucketId: string, categoryId: string) => void;
@@ -2649,12 +2645,32 @@ function BookmarkModal({
     : [];
   const availableCategories = liveCategories(selectedBucket);
 
-  const handleUrlChange = async (url: string) => {
+  // Metadata lookup runs once typing pauses, and only the latest URL's
+  // result is used: each keystroke used to call the cloud function, and an
+  // earlier, slower answer could fill in the title of a different page.
+  const [isExtracting, setIsExtracting] = useState(false);
+  const extractTimerRef = useRef<number | undefined>(undefined);
+  const extractRequestRef = useRef(0);
+
+  useEffect(() => () => {
+    window.clearTimeout(extractTimerRef.current);
+    extractRequestRef.current += 1; // ignore answers after the dialog closes
+  }, []);
+
+  const handleUrlChange = (url: string) => {
     setFormData(prev => ({ ...prev, url }));
     setUrlError(null);
 
-    if (url.trim() && url.startsWith('http') && isAuthenticated) {
-      const metadata = await onExtract(url);
+    window.clearTimeout(extractTimerRef.current);
+    const request = ++extractRequestRef.current;
+    setIsExtracting(false);
+    if (!isAuthenticated || !isWebUrl(url)) return;
+
+    extractTimerRef.current = window.setTimeout(async () => {
+      setIsExtracting(true);
+      const metadata = await onExtract(url.trim());
+      if (request !== extractRequestRef.current) return; // URL changed since
+      setIsExtracting(false);
       if (metadata.title || metadata.description) {
         setFormData(prev => ({
           ...prev,
@@ -2662,7 +2678,7 @@ function BookmarkModal({
           description: prev.description || metadata.description
         }));
       }
-    }
+    }, EXTRACT_DELAY_MS);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
