@@ -69,14 +69,18 @@ function App() {
   const sharedSnapshotRef = useRef(new Map<string, string>());
 
   // Take in shared buckets from the server, keeping this device's unsaved
-  // edits on top. `reset` starts over (sign-in), dropping whatever was held.
-  const applySharedFromServer = useCallback((uid: string, serverBuckets: Bucket[], reset = false) => {
-    const previous = reset ? new Map<string, string>() : new Map(sharedSnapshotRef.current);
+  // edits on top.
+  const applySharedFromServer = useCallback((uid: string, serverBuckets: Bucket[]) => {
+    const previous = new Map(sharedSnapshotRef.current);
     sharedSnapshotRef.current = new Map(serverBuckets.map(b => [b.id, bucketContentKey(b)]));
-    setSharedBucketsData(current =>
-      reset ? serverBuckets : mergeSharedBuckets(current, serverBuckets, previous, uid)
-    );
+    setSharedBucketsData(current => mergeSharedBuckets(current, serverBuckets, previous, uid));
   }, []);
+
+  // Shared buckets with edits not yet saved to the server
+  const hasUnsavedSharedEdits = (uid: string) => sharedBucketsData.some(b =>
+    b.owners?.some(o => o.id === uid && o.permission === 'write') &&
+    bucketContentKey(b) !== sharedSnapshotRef.current.get(b.id)
+  );
   
   // Firebase Authentication state
   const [user, setUser] = useState<User | null>(null);
@@ -242,6 +246,12 @@ function App() {
         // User is signed in. Start from this account's own cache plus any
         // signed-out (local mode) data, which this account now adopts. The
         // signed-out data is cleared so a later account can't pick it up too.
+        // Show this account's cached shared buckets (and any edits made to
+        // them offline) until the server copy arrives.
+        const cachedShared = storage.loadShared(firebaseUser.uid);
+        sharedSnapshotRef.current = new Map(cachedShared.snapshot);
+        setSharedBucketsData(cachedShared.buckets);
+
         const anonData = storage.load();
         const localData = mergeData(storage.load(firebaseUser.uid), anonData);
         if (anonData.buckets.length > 0) {
@@ -254,8 +264,11 @@ function App() {
         ]);
         if (!isCurrent()) return;
         
-        // Start this user's shared buckets fresh (nothing from a previous user)
-        applySharedFromServer(firebaseUser.uid, sharedResult.error ? [] : sharedResult.buckets, true);
+        // Merge the server copy over the cached shared buckets. If it couldn't
+        // be loaded (offline), keep showing the cache.
+        if (!sharedResult.error) {
+          applySharedFromServer(firebaseUser.uid, sharedResult.buckets);
+        }
         
         let finalData = localData;
         if (serverResult.data && !serverResult.error) {
@@ -274,7 +287,8 @@ function App() {
         setIsLoaded(true);
         
         // Select first bucket if none selected (including shared buckets)
-        const allBucketsForSelection = [...finalData.buckets.filter(b => !b.deleted), ...sharedResult.buckets.filter(b => !b.deleted)];
+        const sharedForSelection = sharedResult.error ? cachedShared.buckets : sharedResult.buckets;
+        const allBucketsForSelection = [...finalData.buckets.filter(b => !b.deleted), ...sharedForSelection.filter(b => !b.deleted)];
         if (allBucketsForSelection.length > 0) {
           setSelectedBucket(allBucketsForSelection[0].id);
         }
@@ -342,6 +356,15 @@ function App() {
     
     return () => clearTimeout(timeoutId);
   }, [data, isLoaded, user, syncedUid, isOnline, saveNonce, noteSyncFailure]);
+
+  // Keep a copy of shared buckets on the device for offline use
+  useEffect(() => {
+    if (!user || localOwnerRef.current !== user.uid) return;
+    storage.saveShared(user.uid, {
+      buckets: sharedBucketsData,
+      snapshot: [...sharedSnapshotRef.current],
+    });
+  }, [sharedBucketsData, user]);
 
   // Save shared buckets whenever they change (only buckets user has write permission on)
   useEffect(() => {
@@ -1185,8 +1208,9 @@ function App() {
       const saved = syncedUid === user.uid && isOnline
         ? await serverData.save(user.uid, data)
         : { success: false };
-      if (saved.success) {
+      if (saved.success && !hasUnsavedSharedEdits(user.uid)) {
         storage.clear(user.uid);
+        storage.clearShared(user.uid);
       } else {
         alert('Some changes have not reached the cloud yet. They stay on this device and will sync the next time you sign in here.');
       }

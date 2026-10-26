@@ -1,5 +1,14 @@
 import { AppData, Bucket, Category, Bookmark } from './types';
 
+// Shared buckets cached for offline use, with each bucket's content as of the
+// last server load or save (to tell which have unsaved edits).
+export interface SharedCache {
+  buckets: Bucket[];
+  snapshot: [string, string][];
+}
+
+const SHARED_KEY = 'bookmarks-app-shared';
+
 // Signed-out (local mode) data. Older versions also kept signed-in data here.
 const STORAGE_KEY = 'bookmarks-app-data';
 
@@ -27,6 +36,26 @@ export const storage = {
 
   clear(userId?: string): void {
     localStorage.removeItem(keyFor(userId));
+  },
+
+  loadShared(userId: string): SharedCache {
+    try {
+      const value = JSON.parse(localStorage.getItem(`${SHARED_KEY}:${userId}`) || 'null');
+      if (value && Array.isArray(value.buckets) && Array.isArray(value.snapshot)) {
+        return value;
+      }
+    } catch (_error) {
+      // Invalid JSON, return empty cache
+    }
+    return { buckets: [], snapshot: [] };
+  },
+
+  saveShared(userId: string, cache: SharedCache): void {
+    localStorage.setItem(`${SHARED_KEY}:${userId}`, JSON.stringify(cache));
+  },
+
+  clearShared(userId: string): void {
+    localStorage.removeItem(`${SHARED_KEY}:${userId}`);
   }
 };
 
