@@ -69,6 +69,9 @@ function App() {
   const isSyncingRef = useRef(false);
   // Bumped on every auth change so a slow load for an earlier user is ignored.
   const authSeqRef = useRef(0);
+  // Whose local cache `data` belongs to: a uid, null for signed-out local
+  // mode, or undefined while switching accounts (nothing is written then).
+  const localOwnerRef = useRef<string | null | undefined>(undefined);
   
   // Network state
   const [isOnline, setIsOnline] = useState(navigator.onLine);
@@ -208,7 +211,7 @@ function App() {
       }
       setData(currentData => {
         const merged = mergeData(currentData, loadResult.data!);
-        storage.save(merged);
+        storage.save(merged, uid);
         return merged;
       });
       setServerLastModified(loadResult.lastModified || null);
@@ -283,7 +286,9 @@ function App() {
       const seq = ++authSeqRef.current;
       const isCurrent = () => seq === authSeqRef.current;
 
-      // Block server saves until this user's server data has been merged in.
+      // Block server saves until this user's server data has been merged in,
+      // and local saves until `data` belongs to the new account.
+      localOwnerRef.current = undefined;
       setSyncedUid(null);
       setUser(firebaseUser);
       setIsAuthLoading(false);
@@ -293,8 +298,15 @@ function App() {
         // load below shouldn't wait on two extra writes.
         void userProfile.registerEmail(firebaseUser);
         
-        // User is signed in - load and merge data
-        const localData = storage.load();
+        // User is signed in. Start from this account's own cache plus any
+        // signed-out (local mode) data, which this account now adopts. The
+        // signed-out data is cleared so a later account can't pick it up too.
+        const anonData = storage.load();
+        const localData = mergeData(storage.load(firebaseUser.uid), anonData);
+        if (anonData.buckets.length > 0) {
+          storage.save(localData, firebaseUser.uid);
+          storage.clear();
+        }
         const [serverResult, sharedResult] = await Promise.all([
           serverData.load(firebaseUser.uid),
           sharedBuckets.loadAll(firebaseUser.uid),
@@ -310,13 +322,14 @@ function App() {
           // Merge server and local data
           finalData = mergeData(localData, serverResult.data);
           setServerLastModified(serverResult.lastModified || null);
-          storage.save(finalData); // Save merged data locally
+          storage.save(finalData, firebaseUser.uid); // Save merged data locally
           setSyncedUid(firebaseUser.uid);
         } else {
           // Load failed: show local data but keep server saves blocked. The
           // next sync (focus, online, refresh) retries the load first.
           setServerReachable(false);
         }
+        localOwnerRef.current = firebaseUser.uid;
         setData(finalData);
         setIsLoaded(true);
         
@@ -329,6 +342,7 @@ function App() {
         // User is signed out - load from local storage only, clear shared buckets
         setSharedBucketsData([]);
         const loadedData = storage.load();
+        localOwnerRef.current = null;
         setData(loadedData);
         setIsLoaded(true);
         
@@ -349,8 +363,11 @@ function App() {
   useEffect(() => {
     if (!isLoaded) return;
     
-    // Always save to localStorage (offline-first) - only personal buckets
-    storage.save(data);
+    // Always save to localStorage (offline-first) - only personal buckets,
+    // under the key of the account the data belongs to
+    if (localOwnerRef.current !== undefined) {
+      storage.save(data, localOwnerRef.current ?? undefined);
+    }
     
     // Also save to server if authenticated and online, but only once this
     // user's server data has been loaded and merged into `data`
@@ -1219,10 +1236,23 @@ function App() {
   };
 
   const handleSignOut = async () => {
-    if (confirm('Are you sure you want to log out?')) {
-      await auth.signOut();
-      setServerLastModified(null);
+    if (!confirm('Are you sure you want to log out?')) return;
+
+    // Push any last changes, then remove this account's copy from the device.
+    // If that fails, keep the copy so the changes sync on the next sign-in here.
+    if (user) {
+      const saved = syncedUid === user.uid && isOnline
+        ? await serverData.save(user.uid, data)
+        : { success: false };
+      if (saved.success) {
+        storage.clear(user.uid);
+      } else {
+        alert('Some changes have not reached the cloud yet. They stay on this device and will sync the next time you sign in here.');
+      }
     }
+
+    await auth.signOut();
+    setServerLastModified(null);
   };
 
   const exportData = () => {

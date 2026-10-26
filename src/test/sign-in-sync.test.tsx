@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, act, waitFor } from '@testing-library/react';
+import { render, act, waitFor, screen } from '@testing-library/react';
 import type { AppData } from '../types';
 
 // Drives the real App component through a sign-in with a mocked api module,
@@ -110,6 +110,41 @@ describe('sign-in sync', () => {
     const calls = vi.mocked(serverData.save).mock.calls;
     const saved = calls[calls.length - 1][1] as AppData;
     expect(saved.buckets.map((b) => b.id)).toContain('server-bucket');
+  });
+
+  it("keeps one account's library out of the next account on the same device", async () => {
+    vi.mocked(serverData.load).mockImplementation(async (uid: string) => (
+      uid === 'user-1'
+        ? { data: serverLibrary, lastModified: '2026-01-01T00:00:00.000Z' }
+        : { data: { buckets: [] }, lastModified: null }
+    ));
+    vi.mocked(serverData.check).mockResolvedValue({ lastModified: '2026-01-01T00:00:00.000Z' });
+    vi.mocked(serverData.save).mockResolvedValue({ success: true, lastModified: 'now' });
+
+    render(<App />);
+    await act(async () => { await h.authCallback!(null); });
+
+    // Account 1 signs in and its library is cached on the device.
+    h.currentUser = { uid: 'user-1' };
+    await act(async () => { await h.authCallback!(user); });
+    await waitFor(() => expect(screen.queryAllByText('From the cloud').length).toBeGreaterThan(0));
+
+    // Signed out: account 1's library is no longer shown.
+    h.currentUser = null;
+    await act(async () => { await h.authCallback!(null); });
+    expect(screen.queryAllByText('From the cloud')).toHaveLength(0);
+
+    // Account 2 signs in on the same device; account 1's data must not be
+    // merged into it.
+    vi.mocked(serverData.save).mockClear();
+    h.currentUser = { uid: 'user-2' };
+    await act(async () => { await h.authCallback!({ ...user, uid: 'user-2', email: 'other@example.com' }); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 800)); });
+    for (const call of vi.mocked(serverData.save).mock.calls) {
+      expect(call[0]).toBe('user-2');
+      expect((call[1] as AppData).buckets.map((b) => b.id)).not.toContain('server-bucket');
+    }
+    expect(screen.queryAllByText('From the cloud')).toHaveLength(0);
   });
 
   it('does not save to the server when the initial load fails', async () => {

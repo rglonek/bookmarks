@@ -1,11 +1,17 @@
 import { AppData, Bucket, Category, Bookmark } from './types';
 
+// Signed-out (local mode) data. Older versions also kept signed-in data here.
 const STORAGE_KEY = 'bookmarks-app-data';
 
+// Each signed-in account gets its own key, so one account's library is never
+// shown to, or merged into, another account that signs in on the same device.
+const keyFor = (userId?: string): string =>
+  userId ? `${STORAGE_KEY}:${userId}` : STORAGE_KEY;
+
 export const storage = {
-  load(): AppData {
+  load(userId?: string): AppData {
     try {
-      const data = localStorage.getItem(STORAGE_KEY);
+      const data = localStorage.getItem(keyFor(userId));
       if (data) {
         return JSON.parse(data);
       }
@@ -15,12 +21,12 @@ export const storage = {
     return { buckets: [] };
   },
 
-  save(data: AppData): void {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  save(data: AppData, userId?: string): void {
+    localStorage.setItem(keyFor(userId), JSON.stringify(data));
   },
 
-  clear(): void {
-    localStorage.removeItem(STORAGE_KEY);
+  clear(userId?: string): void {
+    localStorage.removeItem(keyFor(userId));
   }
 };
 
@@ -46,4 +52,3 @@ export const createBookmark = (data: Omit<Bookmark, 'id' | 'createdAt' | 'update
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString()
 });
-
