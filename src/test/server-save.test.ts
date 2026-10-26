@@ -101,6 +101,14 @@ describe('serverData.save', () => {
     expect((h.written!.data as AppData).buckets[0].name).toBe('Reading list');
   });
 
+  it('refuses a library over the sync size limit without writing', async () => {
+    const big = Array.from({ length: 2000 }, (_, i) => bookmark(`bm-${i}`, { notes: 'x'.repeat(600) }));
+    const result = await serverData.save('user-1', library(big));
+    expect(result.success).toBe(false);
+    expect(result.failure).toBe('too-large');
+    expect(h.written).toBeNull();
+  });
+
   it('stamps updatedAt and returns it as the change marker', async () => {
     const result = await serverData.save('user-1', library([]));
     expect(h.written!.updatedAt).toBe(result.lastModified);

@@ -26,6 +26,7 @@ import {
   runTransaction
 } from 'firebase/firestore';
 import { mergeBucket, mergeData, pruneTombstones } from './merge';
+import { assertSyncable, LibraryTooLargeError } from './limits';
 import { httpsCallable } from 'firebase/functions';
 
 export interface MetadataResponse {
@@ -45,6 +46,7 @@ export function syncFailureOf(error: unknown): SyncFailure {
     ? String((error as { code: unknown }).code)
     : '';
   const message = error instanceof Error ? error.message : '';
+  if (error instanceof LibraryTooLargeError) return 'too-large';
   switch (code) {
     case 'unavailable':
     case 'deadline-exceeded':
@@ -213,9 +215,12 @@ export const serverData = {
         const docSnap = await transaction.get(docRef);
         const serverCopy = docSnap.exists() ? asAppData(docSnap.data().data) : { buckets: [] };
         const result = pruneTombstones(mergeData(data, serverCopy));
+        // Remove undefined values (Firestore doesn't accept undefined)
+        const cleanData = JSON.parse(JSON.stringify(result));
+        // Fail with a clear error rather than Firestore's size rejection
+        assertSyncable(cleanData);
         transaction.set(docRef, {
-          // Remove undefined values (Firestore doesn't accept undefined)
-          data: JSON.parse(JSON.stringify(result)),
+          data: cleanData,
           lastModified: serverTimestamp(),
           updatedAt: now
         });
@@ -395,9 +400,11 @@ export const sharedBuckets = {
           owners: docData.owners,
           createdBy: docData.createdBy
         };
+        // Remove undefined values (Firestore doesn't accept undefined)
+        const cleanBucket = JSON.parse(JSON.stringify(result));
+        assertSyncable(cleanBucket);
         transaction.update(docRef, {
-          // Remove undefined values (Firestore doesn't accept undefined)
-          bucket: JSON.parse(JSON.stringify(result)),
+          bucket: cleanBucket,
           lastModified: serverTimestamp()
         });
         return result;

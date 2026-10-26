@@ -2,6 +2,7 @@ import { doc, getDoc, runTransaction, serverTimestamp } from 'firebase/firestore
 import type { AppData } from '../../src/types';
 import { applySave, type SaveInput, type SaveResult } from './mutate';
 import { auth, db } from './firebase';
+import { assertSyncable, LibraryTooLargeError } from '../../src/limits';
 
 function userDoc(userId: string) {
   if (!db) throw new Error('Firebase is not configured.');
@@ -39,8 +40,10 @@ export async function saveBookmark(userId: string, input: SaveInput): Promise<Sa
     const current = snap.exists() ? asAppData(snap.data().data) : { buckets: [] };
     const result = applySave(current, input);
     if (result.status !== 'added') return result;
+    const data = JSON.parse(JSON.stringify(result.data)) as AppData;
+    assertSyncable(data);
     transaction.set(ref, {
-      data: JSON.parse(JSON.stringify(result.data)) as AppData,
+      data,
       lastModified: serverTimestamp(),
       updatedAt: new Date().toISOString(),
     });
@@ -49,6 +52,9 @@ export async function saveBookmark(userId: string, input: SaveInput): Promise<Sa
 }
 
 export function friendlySaveError(error: unknown): string {
+  if (error instanceof LibraryTooLargeError) {
+    return 'Your library is full (Firestore allows about 1 MB). Delete some bookmarks on the website to save more.';
+  }
   const code = error && typeof error === 'object' && 'code' in error
     ? String((error as { code?: unknown }).code ?? '')
     : '';

@@ -5,6 +5,7 @@ import { bucketContentKey, mergeBucket, mergeData, mergeSharedBuckets, pruneTomb
 import { extractMetadata, auth, serverData, sharedBuckets, userProfile, syncFailureOf, type SyncFailure } from './api';
 import { User } from 'firebase/auth';
 import { isWebUrl } from './url';
+import { formatMegabytes, jsonBytes, MAX_SYNC_BYTES } from './limits';
 
 type ViewMode = 'card' | 'grid' | 'list';
 
@@ -1217,9 +1218,14 @@ function App() {
       try {
         const importedData = JSON.parse(e.target?.result as string);
         if (importedData.buckets && Array.isArray(importedData.buckets)) {
+          // Keep what the file doesn't contain as deleted records, so the
+          // replacement also reaches the cloud and other devices.
+          const next = replaceLibrary(data, importedData);
+          if (user && jsonBytes(next) > MAX_SYNC_BYTES) {
+            alert(`This file would make your library ${formatMegabytes(jsonBytes(next))}, over the ${formatMegabytes(MAX_SYNC_BYTES)} that can sync. Nothing was imported.`);
+            return;
+          }
           if (confirm('This will replace all existing data. Are you sure?')) {
-            // Keep what the file doesn't contain as deleted records, so the
-            // replacement also reaches the cloud and other devices.
             setData(prev => replaceLibrary(prev, importedData));
             alert('Data imported successfully!');
           }
@@ -1350,31 +1356,34 @@ function App() {
         }
 
         // Import into selected bucket
-        setData(prev => ({
-          ...prev,
-          buckets: prev.buckets.map(bucket => {
-            if (bucket.id !== chromeImportBucket) return bucket;
+        const newCategories = parsed.categories.map(cat => {
+          const category = createCategory(cat.name);
+          category.bookmarks = cat.bookmarks.map(bm => 
+            createBookmark({
+              title: bm.title,
+              url: bm.url,
+              description: '',
+              tags: [],
+              notes: ''
+            })
+          );
+          return category;
+        });
+        const addTo = (buckets: Bucket[]) => buckets.map(bucket =>
+          bucket.id === chromeImportBucket
+            ? { ...bucket, categories: [...bucket.categories, ...newCategories] }
+            : bucket
+        );
 
-            const newCategories = parsed.categories.map(cat => {
-              const category = createCategory(cat.name);
-              category.bookmarks = cat.bookmarks.map(bm => 
-                createBookmark({
-                  title: bm.title,
-                  url: bm.url,
-                  description: '',
-                  tags: [],
-                  notes: ''
-                })
-              );
-              return category;
-            });
+        // A signed-in library is one Firestore document; don't grow it past
+        // what can sync (a full browser export easily can).
+        const nextBytes = jsonBytes({ buckets: addTo(data.buckets) });
+        if (user && nextBytes > MAX_SYNC_BYTES) {
+          alert(`This import would make your library ${formatMegabytes(nextBytes)}, over the ${formatMegabytes(MAX_SYNC_BYTES)} that can sync. Nothing was imported. Try exporting a single folder from Chrome.`);
+          return;
+        }
 
-            return {
-              ...bucket,
-              categories: [...bucket.categories, ...newCategories]
-            };
-          })
-        }));
+        setData(prev => ({ ...prev, buckets: addTo(prev.buckets) }));
 
         alert(`Successfully imported ${parsed.categories.length} categories with bookmarks!`);
         setShowChromeImportModal(false);
