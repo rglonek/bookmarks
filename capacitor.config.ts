@@ -36,6 +36,14 @@ const config: CapacitorConfig = {
   
   // Plugins configuration
   plugins: {
+    // Native Google sign-in. Google blocks its sign-in page inside WebViews,
+    // so the app signs in natively and passes the token to the Firebase JS SDK
+    // (skipNativeAuth). Needs google-services.json / GoogleService-Info.plist;
+    // see docs/MOBILE_APP_SETUP.md.
+    FirebaseAuthentication: {
+      skipNativeAuth: true,
+      providers: ['google.com']
+    },
     // Splash screen settings
     SplashScreen: {
       launchShowDuration: 2000,

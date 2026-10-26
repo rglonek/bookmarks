@@ -40,32 +40,37 @@ npm run cap:sync
 
 ## Firebase Authentication
 
-### Current Setup (Works Out of the Box)
+Google does not allow its sign-in page inside an embedded WebView (it fails
+with `disallowed_useragent`), so the web sign-in popup cannot work in the
+native app. The native app signs in with the platform's Google SDK through
+[`@capacitor-firebase/authentication`](https://github.com/capawesome-team/capacitor-firebase/tree/main/packages/authentication)
+and hands the Google token to the Firebase JS SDK (`skipNativeAuth: true` in
+`capacitor.config.ts`). The website keeps using the popup.
 
-The existing Firebase Web SDK authentication works in the Capacitor WebView. Google Sign-in will:
-- Open in a popup or redirect
-- Work the same as the web version
-- Persist auth state in WebView localStorage
+The code, plugin config, Android Gradle flag (`rgcfaIncludeGoogle`) and iOS
+Podfile entry are already in the repo. These steps need your own Firebase
+project files, so do them once:
 
-**No changes needed** - your auth code works as-is.
+### Android
 
-### Optional: Native Google Sign-In (Better UX)
+1. In Firebase Console → Project settings, add an Android app with package
+   name `com.bookmarks.app`.
+2. Add the SHA-1 fingerprint of your debug and release signing keys to that
+   app (`./gradlew signingReport` in `android/` prints them).
+3. Download `google-services.json` into `android/app/`. The app's Gradle
+   build applies the Google services plugin when this file exists.
 
-For a smoother native sign-in experience (uses the device's Google account), you can add the Capacitor Firebase plugin:
+### iOS
 
-```bash
-npm install @capacitor-firebase/authentication
-npx cap sync
-```
+1. In Firebase Console → Project settings, add an iOS app with bundle ID
+   `com.bookmarks.app`.
+2. Download `GoogleService-Info.plist` and add it to the `App` target in Xcode
+   (`ios/App/App/`).
+3. In Xcode → App target → Info → URL Types, add a URL scheme with the
+   `REVERSED_CLIENT_ID` value from `GoogleService-Info.plist`.
+4. Run `npx cap sync ios` (needs Xcode and CocoaPods) to install the pods.
 
-Then follow the plugin setup:
-- [iOS Setup](https://github.com/capawesome-team/capacitor-firebase/blob/main/packages/authentication/docs/setup-ios.md)
-- [Android Setup](https://github.com/capawesome-team/capacitor-firebase/blob/main/packages/authentication/docs/setup-android.md)
-
-This requires:
-1. Download `GoogleService-Info.plist` (iOS) and `google-services.json` (Android) from Firebase Console
-2. Add them to the native projects
-3. Configure URL schemes and SHA certificates
+Google sign-in must be enabled in Firebase Authentication, as for the website.
 
 ## Building for Release
 

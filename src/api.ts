@@ -2,10 +2,13 @@ import { AppData, Bucket, SharedBucketDoc, SharedOwner, SharePermission } from '
 import { auth as firebaseAuth, db, functions, googleProvider } from './firebase';
 import { 
   signInWithPopup, 
+  signInWithCredential,
   signOut, 
   onAuthStateChanged,
+  GoogleAuthProvider,
   User
 } from 'firebase/auth';
+import { Capacitor } from '@capacitor/core';
 import { 
   doc, 
   getDoc, 
@@ -61,6 +64,21 @@ export const auth = {
   // Sign in with Google
   async signInWithGoogle(): Promise<{ success: boolean; user?: User; error?: string }> {
     try {
+      if (Capacitor.isNativePlatform()) {
+        // Google blocks its sign-in page inside embedded WebViews, so the
+        // native app signs in with the platform's Google SDK and hands the
+        // token to the Firebase JS SDK.
+        const { FirebaseAuthentication } = await import('@capacitor-firebase/authentication');
+        const native = await FirebaseAuthentication.signInWithGoogle({ skipNativeAuth: true });
+        const idToken = native.credential?.idToken;
+        if (!idToken) {
+          throw new Error('Google sign-in did not return a token.');
+        }
+        const credential = GoogleAuthProvider.credential(idToken, native.credential?.accessToken);
+        const result = await signInWithCredential(firebaseAuth, credential);
+        return { success: true, user: result.user };
+      }
+
       const result = await signInWithPopup(firebaseAuth, googleProvider);
       return { success: true, user: result.user };
     } catch (error) {
@@ -73,6 +91,11 @@ export const auth = {
   // Sign out
   async signOut(): Promise<void> {
     try {
+      if (Capacitor.isNativePlatform()) {
+        // Also end the native Google session so the account picker shows next time
+        const { FirebaseAuthentication } = await import('@capacitor-firebase/authentication');
+        await FirebaseAuthentication.signOut();
+      }
       await signOut(firebaseAuth);
     } catch (error) {
       console.error('Sign-out error:', error);

@@ -1,5 +1,6 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider } from 'firebase/auth';
+import { getAuth, initializeAuth, indexedDBLocalPersistence, GoogleAuthProvider, type Auth } from 'firebase/auth';
+import { Capacitor } from '@capacitor/core';
 import { getFirestore } from 'firebase/firestore';
 import { getFunctions } from 'firebase/functions';
 
@@ -19,7 +20,12 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 
 // Initialize Firebase services
-export const auth = getAuth(app);
+// In the native app, getAuth() waits on the web popup/redirect helper, which
+// can't load inside the WebView. Sign-in there goes through the native plugin
+// instead (see api.ts), so the web auth only needs to keep the session.
+export const auth: Auth = Capacitor.isNativePlatform()
+  ? initializeAuth(app, { persistence: indexedDBLocalPersistence })
+  : getAuth(app);
 export const db = getFirestore(app, 'bookmarks');
 export const functions = getFunctions(app);
 
