@@ -16,6 +16,15 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID || 'YOUR_APP_ID',
 };
 
+// Without a config the app still runs in local mode (placeholders keep Firebase
+// from failing at start-up), but sign-in and sync can't work, so say so.
+if (!import.meta.env.VITE_FIREBASE_API_KEY || !import.meta.env.VITE_FIREBASE_PROJECT_ID) {
+  console.warn(
+    'Firebase is not configured: set the VITE_FIREBASE_* values in .env (see .env.example) and rebuild. ' +
+    'Until then sign-in and cloud sync will not work; bookmarks stay on this device.'
+  );
+}
+
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 

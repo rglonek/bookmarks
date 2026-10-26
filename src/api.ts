@@ -130,30 +130,6 @@ export const auth = {
     } catch (error) {
       console.error('Sign-out error:', error);
     }
-  },
-
-  // Legacy methods for backwards compatibility during migration
-  // These can be removed after full migration
-  async register(_username: string, _password: string): Promise<{ success: boolean; error?: string }> {
-    // Not used with Google Sign-In
-    return { success: false, error: 'Please use Google Sign-In' };
-  },
-
-  async login(_username: string, _password: string): Promise<{ success: boolean; token?: string; username?: string; error?: string }> {
-    // Not used with Google Sign-In
-    return { success: false, error: 'Please use Google Sign-In' };
-  },
-
-  async logout(_token: string): Promise<void> {
-    await this.signOut();
-  },
-
-  async checkSession(_token: string): Promise<{ username?: string; error?: string }> {
-    const user = firebaseAuth.currentUser;
-    if (user) {
-      return { username: user.displayName || user.email || 'User' };
-    }
-    return { error: 'Not authenticated' };
   }
 };
 
