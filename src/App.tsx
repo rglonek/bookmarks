@@ -2427,27 +2427,44 @@ function App() {
           sharedUrl={sharedUrl}
           buckets={writableBuckets}
           isAuthenticated={!!user}
-          onSave={(bucketId, categoryId, bookmarkData) => {
-            const isSharedBucket = sharedBucketsData.some(b => b.id === bucketId);
+          onSignIn={handleGoogleSignIn}
+          onSave={(destination, bookmarkData) => {
             const newBookmark = createBookmark(bookmarkData);
             
-            const updateBuckets = (buckets: Bucket[]) => buckets.map(bucket =>
-              bucket.id === bucketId
-                ? {
-                    ...bucket,
-                    categories: bucket.categories.map(category =>
-                      category.id === categoryId
-                        ? { ...category, bookmarks: [...category.bookmarks, newBookmark] }
-                        : category
-                    )
-                  }
-                : bucket
-            );
-            
-            if (isSharedBucket) {
-              setSharedBucketsData(updateBuckets);
+            if (!destination.bucketId) {
+              // No buckets yet: create one to hold the link
+              const category = { ...createCategory(destination.newCategoryName), bookmarks: [newBookmark] };
+              const bucket = { ...createBucket(destination.newBucketName), categories: [category] };
+              setData(prev => ({ ...prev, buckets: [...prev.buckets, bucket] }));
+              setSelectedBucket(bucket.id);
             } else {
-              setData(prev => ({ ...prev, buckets: updateBuckets(prev.buckets) }));
+              const bucketId = destination.bucketId;
+              const isSharedBucket = sharedBucketsData.some(b => b.id === bucketId);
+              // The bucket has no categories: create one to hold the link
+              const newCategory = destination.categoryId
+                ? null
+                : { ...createCategory(destination.newCategoryName), bookmarks: [newBookmark] };
+              
+              const updateBuckets = (buckets: Bucket[]) => buckets.map(bucket =>
+                bucket.id === bucketId
+                  ? {
+                      ...bucket,
+                      categories: newCategory
+                        ? [...bucket.categories, newCategory]
+                        : bucket.categories.map(category =>
+                            category.id === destination.categoryId
+                              ? { ...category, bookmarks: [...category.bookmarks, newBookmark] }
+                              : category
+                          )
+                    }
+                  : bucket
+              );
+              
+              if (isSharedBucket) {
+                setSharedBucketsData(updateBuckets);
+              } else {
+                setData(prev => ({ ...prev, buckets: updateBuckets(prev.buckets) }));
+              }
             }
             
             setShowAddSharedBookmarkModal(false);
@@ -2891,51 +2908,58 @@ function BookmarkModal({
   );
 }
 
+// Where a shared link is saved: an existing bucket and category, or new ones
+// (created when the bucket has no categories, or there are no buckets yet)
+interface SharedLinkDestination {
+  bucketId?: string;
+  categoryId?: string;
+  newBucketName: string;
+  newCategoryName: string;
+}
+
 // Add Shared Bookmark Modal - for receiving URLs from browser share
 function AddSharedBookmarkModal({
   sharedUrl,
   buckets,
   isAuthenticated,
+  onSignIn,
   onSave,
   onClose
 }: {
   sharedUrl: { url: string; title: string; text: string };
   buckets: Bucket[];
   isAuthenticated: boolean;
-  onSave: (bucketId: string, categoryId: string, data: Omit<Bookmark, 'id' | 'createdAt' | 'updatedAt'>) => void;
+  onSignIn: () => void;
+  onSave: (destination: SharedLinkDestination, data: Omit<Bookmark, 'id' | 'createdAt' | 'updatedAt'>) => void;
   onClose: () => void;
 }) {
   const [selectedBucket, setSelectedBucket] = useState<string>('');
   const [selectedCategory, setSelectedCategory] = useState<string>('');
+  const [newBucketName, setNewBucketName] = useState('Inbox');
+  const [newCategoryName, setNewCategoryName] = useState('Unsorted');
   const [title, setTitle] = useState(sharedUrl.title || '');
   const [description, setDescription] = useState(sharedUrl.text || '');
   const [tags, setTags] = useState('');
   const [notes, setNotes] = useState('');
 
-  // Get categories for selected bucket
-  const selectedBucketData = buckets.find(b => b.id === selectedBucket);
-  const categories = selectedBucketData 
-    ? [...selectedBucketData.categories].filter(c => !c.deleted).sort((a, b) => a.name.localeCompare(b.name))
+  // The choice falls back to the first bucket and category, so it stays valid
+  // while buckets load (for example right after signing in)
+  const bucket = buckets.find(b => b.id === selectedBucket) ?? buckets[0];
+  const categories = bucket
+    ? bucket.categories.filter(c => !c.deleted).sort((a, b) => a.name.localeCompare(b.name))
     : [];
-
-  // Auto-select first bucket and category
-  useEffect(() => {
-    if (buckets.length > 0 && !selectedBucket) {
-      setSelectedBucket(buckets[0].id);
-    }
-  }, [buckets, selectedBucket]);
-
-  useEffect(() => {
-    if (categories.length > 0 && !selectedCategory) {
-      setSelectedCategory(categories[0].id);
-    }
-  }, [categories, selectedCategory]);
+  const category = categories.find(c => c.id === selectedCategory) ?? categories[0];
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedBucket || !selectedCategory || !title.trim()) return;
+    if (!title.trim()) return;
 
-    onSave(selectedBucket, selectedCategory, {
+    onSave({
+      bucketId: bucket?.id,
+      categoryId: category?.id,
+      newBucketName: newBucketName.trim() || 'Inbox',
+      newCategoryName: newCategoryName.trim() || 'Unsorted',
+    }, {
       title: title.trim(),
       url: sharedUrl.url,
       description: description.trim(),
@@ -2944,51 +2968,7 @@ function AddSharedBookmarkModal({
     });
   };
 
-  if (!isAuthenticated) {
-    return (
-      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-        <div className="bg-white rounded-lg p-6 max-w-md w-full">
-          <h2 className="text-xl font-semibold mb-4">Save Bookmark</h2>
-          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 text-yellow-800 mb-4">
-            <p className="font-medium">Sign in required</p>
-            <p className="text-sm mt-1">Please sign in to save bookmarks.</p>
-          </div>
-          <div className="bg-gray-50 rounded-lg p-3 mb-4">
-            <p className="text-sm text-gray-600 break-all">{sharedUrl.url}</p>
-          </div>
-          <button
-            onClick={onClose}
-            className="w-full bg-gray-200 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-300 transition"
-          >
-            Close
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  if (buckets.length === 0) {
-    return (
-      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-        <div className="bg-white rounded-lg p-6 max-w-md w-full">
-          <h2 className="text-xl font-semibold mb-4">Save Bookmark</h2>
-          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 text-yellow-800 mb-4">
-            <p className="font-medium">No buckets available</p>
-            <p className="text-sm mt-1">Please create a bucket first to save bookmarks.</p>
-          </div>
-          <div className="bg-gray-50 rounded-lg p-3 mb-4">
-            <p className="text-sm text-gray-600 break-all">{sharedUrl.url}</p>
-          </div>
-          <button
-            onClick={onClose}
-            className="w-full bg-gray-200 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-300 transition"
-          >
-            Close
-          </button>
-        </div>
-      </div>
-    );
-  }
+  const fieldClass = "w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500";
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
@@ -2999,45 +2979,72 @@ function AddSharedBookmarkModal({
           <p className="text-sm text-indigo-800 break-all">{sharedUrl.url}</p>
         </div>
 
+        {!isAuthenticated && (
+          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-4 text-sm text-yellow-800 flex items-center justify-between gap-3">
+            <span>Not signed in: this saves on this device only.</span>
+            <button
+              type="button"
+              onClick={onSignIn}
+              className="flex-shrink-0 bg-white border border-yellow-300 text-yellow-900 px-3 py-1 rounded-lg hover:bg-yellow-100 transition"
+            >
+              Sign in
+            </button>
+          </div>
+        )}
+
         <form onSubmit={handleSubmit}>
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="block text-sm font-medium mb-1">Bucket *</label>
-                <select
-                  value={selectedBucket}
-                  onChange={(e) => {
-                    setSelectedBucket(e.target.value);
-                    setSelectedCategory('');
-                  }}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  required
-                >
-                  <option value="">Select bucket</option>
-                  {buckets.map(bucket => (
-                    <option key={bucket.id} value={bucket.id}>
-                      {bucket.name}{bucket.isShared ? ' 👥' : ''}
-                    </option>
-                  ))}
-                </select>
+                {bucket ? (
+                  <select
+                    value={bucket.id}
+                    onChange={(e) => {
+                      setSelectedBucket(e.target.value);
+                      setSelectedCategory('');
+                    }}
+                    className={fieldClass}
+                    required
+                  >
+                    {buckets.map(b => (
+                      <option key={b.id} value={b.id}>
+                        {b.name}{b.isShared ? ' 👥' : ''}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    value={newBucketName}
+                    onChange={(e) => setNewBucketName(e.target.value)}
+                    aria-label="New bucket name"
+                    className={fieldClass}
+                  />
+                )}
               </div>
 
               <div>
                 <label className="block text-sm font-medium mb-1">Category *</label>
-                <select
-                  value={selectedCategory}
-                  onChange={(e) => setSelectedCategory(e.target.value)}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  required
-                  disabled={!selectedBucket}
-                >
-                  <option value="">Select category</option>
-                  {categories.map(category => (
-                    <option key={category.id} value={category.id}>{category.name}</option>
-                  ))}
-                </select>
-                {selectedBucket && categories.length === 0 && (
-                  <p className="text-xs text-red-600 mt-1">No categories in this bucket</p>
+                {category ? (
+                  <select
+                    value={category.id}
+                    onChange={(e) => setSelectedCategory(e.target.value)}
+                    className={fieldClass}
+                    required
+                  >
+                    {categories.map(c => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    value={newCategoryName}
+                    onChange={(e) => setNewCategoryName(e.target.value)}
+                    aria-label="New category name"
+                    className={fieldClass}
+                  />
                 )}
               </div>
             </div>
@@ -3049,7 +3056,7 @@ function AddSharedBookmarkModal({
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder="Bookmark title"
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className={fieldClass}
                 required
               />
             </div>
@@ -3061,7 +3068,7 @@ function AddSharedBookmarkModal({
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder="Brief description"
                 rows={2}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className={fieldClass}
               />
             </div>
 
@@ -3072,7 +3079,7 @@ function AddSharedBookmarkModal({
                 value={tags}
                 onChange={(e) => setTags(e.target.value)}
                 placeholder="react, tutorial, javascript"
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className={fieldClass}
               />
             </div>
 
@@ -3083,7 +3090,7 @@ function AddSharedBookmarkModal({
                 onChange={(e) => setNotes(e.target.value)}
                 placeholder="Additional notes"
                 rows={2}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className={fieldClass}
               />
             </div>
           </div>
@@ -3091,7 +3098,7 @@ function AddSharedBookmarkModal({
           <div className="flex gap-2 mt-6">
             <button
               type="submit"
-              disabled={!selectedBucket || !selectedCategory || !title.trim()}
+              disabled={!title.trim()}
               className="flex-1 bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
             >
               Save Bookmark
