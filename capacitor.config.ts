@@ -26,8 +26,8 @@ const config: CapacitorConfig = {
   
   // Android specific settings  
   android: {
-    // Allow mixed content for development
-    allowMixedContent: true,
+    // Mixed content (http resources inside the app's https WebView) stays
+    // off: every Firebase and Google endpoint the app uses is https.
     // Capture external links in the app
     captureInput: true,
     // Use hardware back button
