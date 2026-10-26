@@ -20,8 +20,8 @@ service cloud.firestore {
 
     // User profile - display info shown to people you share with
     match /userProfiles/{userId} {
-      // Anyone authenticated can read (for email lookup)
-      allow read: if request.auth != null;
+      // Anyone authenticated can fetch one profile by uid, but not list them
+      allow get: if request.auth != null;
       // Only the user can write their own profile, with their own verified email
       allow create, update: if hasVerifiedEmail() &&
                                request.auth.uid == userId &&
@@ -66,8 +66,8 @@ service cloud.firestore {
     // another person's address at their own account. emailLookup now falls
     // through to the deny-all rule below, so its old entries are never read.
     match /emailIndex/{email} {
-      // Anyone authenticated can read (to find users by email)
-      allow read: if request.auth != null;
+      // Anyone authenticated can look up one exact address, but not list them
+      allow get: if request.auth != null;
       // Only the verified owner of an address can map it, and only to themselves
       allow create, update: if hasVerifiedEmail() &&
                                email == ownEmail() &&
