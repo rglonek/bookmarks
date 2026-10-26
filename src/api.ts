@@ -22,7 +22,7 @@ import {
   arrayRemove,
   runTransaction
 } from 'firebase/firestore';
-import { mergeData, pruneTombstones } from './merge';
+import { mergeBucket, mergeData, pruneTombstones } from './merge';
 import { httpsCallable } from 'firebase/functions';
 
 export interface MetadataResponse {
@@ -323,24 +323,37 @@ export const sharedBuckets = {
     }
   },
 
-  // Save/update a shared bucket
-  async save(bucketId: string, bucket: Bucket): Promise<{ success: boolean; error?: string }> {
+  // Save a shared bucket's content. Merges with the server copy inside a
+  // transaction, so collaborators' changes since this device last loaded the
+  // bucket are kept. Membership fields are left as the server has them.
+  // Returns the merged bucket that was written.
+  async save(bucketId: string, bucket: Bucket): Promise<{ success: boolean; bucket?: Bucket; error?: string }> {
     try {
       const docRef = doc(db, 'sharedBuckets', bucketId);
-      
-      // Clean bucket data to remove undefined values (Firestore doesn't accept undefined)
-      const cleanBucket = JSON.parse(JSON.stringify({
-        ...bucket,
-        isShared: true
-      }));
-      
-      // Only update the bucket content and lastModified
-      await updateDoc(docRef, {
-        bucket: cleanBucket,
-        lastModified: serverTimestamp()
+
+      const merged = await runTransaction(db, async (transaction) => {
+        const docSnap = await transaction.get(docRef);
+        if (!docSnap.exists()) {
+          throw new Error('Shared bucket not found');
+        }
+        const docData = docSnap.data() as SharedBucketDoc;
+        const combined = mergeBucket(bucket, { ...docData.bucket, id: bucketId });
+        const result: Bucket = {
+          ...(pruneTombstones({ buckets: [combined] }).buckets[0] ?? combined),
+          id: bucketId,
+          isShared: true,
+          owners: docData.owners,
+          createdBy: docData.createdBy
+        };
+        transaction.update(docRef, {
+          // Remove undefined values (Firestore doesn't accept undefined)
+          bucket: JSON.parse(JSON.stringify(result)),
+          lastModified: serverTimestamp()
+        });
+        return result;
       });
-      
-      return { success: true };
+
+      return { success: true, bucket: merged };
     } catch (error) {
       console.error('Error saving shared bucket:', error);
       return { success: false, error: 'Failed to save shared bucket' };

@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { AppData, Bucket, Category, Bookmark, SharedOwner, SharePermission } from './types';
 import { storage, createBucket, createCategory, createBookmark, generateId } from './storage';
-import { mergeData, pruneTombstones, replaceLibrary } from './merge';
+import { bucketContentKey, mergeBucket, mergeData, mergeSharedBuckets, pruneTombstones, replaceLibrary } from './merge';
 import { extractMetadata, auth, serverData, sharedBuckets, userProfile } from './api';
 import { User } from 'firebase/auth';
 
@@ -54,6 +54,19 @@ function App() {
   
   // Separate state for shared buckets
   const [sharedBucketsData, setSharedBucketsData] = useState<Bucket[]>([]);
+  // Each shared bucket's content as of the last load from or save to the
+  // server. A bucket whose content differs has unsaved edits on this device.
+  const sharedSnapshotRef = useRef(new Map<string, string>());
+
+  // Take in shared buckets from the server, keeping this device's unsaved
+  // edits on top. `reset` starts over (sign-in), dropping whatever was held.
+  const applySharedFromServer = useCallback((uid: string, serverBuckets: Bucket[], reset = false) => {
+    const previous = reset ? new Map<string, string>() : new Map(sharedSnapshotRef.current);
+    sharedSnapshotRef.current = new Map(serverBuckets.map(b => [b.id, bucketContentKey(b)]));
+    setSharedBucketsData(current =>
+      reset ? serverBuckets : mergeSharedBuckets(current, serverBuckets, previous, uid)
+    );
+  }, []);
   
   // Firebase Authentication state
   const [user, setUser] = useState<User | null>(null);
@@ -124,12 +137,12 @@ function App() {
     const sharedResult = await sharedBuckets.loadAll(uid);
     if (!isCurrentUser()) return true;
     if (!sharedResult.error) {
-      setSharedBucketsData(sharedResult.buckets);
+      applySharedFromServer(uid, sharedResult.buckets);
     } else {
       console.warn('Failed to load shared buckets:', sharedResult.error);
     }
     return true;
-  }, [syncedUid]);
+  }, [syncedUid, applySharedFromServer]);
 
   // Sync with server - fetch and merge
   const syncWithServer = useCallback(async () => {
@@ -214,9 +227,8 @@ function App() {
         ]);
         if (!isCurrent()) return;
         
-        if (!sharedResult.error) {
-          setSharedBucketsData(sharedResult.buckets);
-        }
+        // Start this user's shared buckets fresh (nothing from a previous user)
+        applySharedFromServer(firebaseUser.uid, sharedResult.error ? [] : sharedResult.buckets, true);
         
         let finalData = localData;
         if (serverResult.data && !serverResult.error) {
@@ -241,6 +253,7 @@ function App() {
         }
       } else {
         // User is signed out - load from local storage only, clear shared buckets
+        sharedSnapshotRef.current = new Map();
         setSharedBucketsData([]);
         const loadedData = storage.load();
         localOwnerRef.current = null;
@@ -257,7 +270,7 @@ function App() {
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [applySharedFromServer]);
 
   // Save data whenever it changes (but only after initial load)
   useEffect(() => {
@@ -314,12 +327,26 @@ function App() {
         if (userOwner?.permission !== 'write') {
           continue; // Skip read-only buckets
         }
-        
-        try {
-          await sharedBuckets.save(bucket.id, bucket);
-        } catch (err) {
-          console.error('Failed to save shared bucket:', err);
+        // Only save buckets changed on this device. Writing back a copy that
+        // was just loaded would undo a collaborator's concurrent edit.
+        if (bucketContentKey(bucket) === sharedSnapshotRef.current.get(bucket.id)) {
+          continue;
         }
+        
+        const result = await sharedBuckets.save(bucket.id, bucket);
+        if (!result.success || !result.bucket) {
+          console.error('Failed to save shared bucket:', result.error);
+          continue;
+        }
+        const saved = result.bucket;
+        sharedSnapshotRef.current.set(bucket.id, bucketContentKey(saved));
+        // Take in collaborators' changes the save merged in, keeping any edit
+        // made on this device while the save was running.
+        setSharedBucketsData(current => current.map(b => {
+          if (b.id !== bucket.id) return b;
+          const next = { ...mergeBucket(b, saved), isShared: true, owners: b.owners };
+          return bucketContentKey(next) === bucketContentKey(b) ? b : next;
+        }));
       }
     }, 500);
     
@@ -705,6 +732,7 @@ function App() {
           createdBy: user.uid
         };
         
+        sharedSnapshotRef.current.set(newSharedBucket.id, bucketContentKey(newSharedBucket));
         setSharedBucketsData(prev => [...prev, newSharedBucket]);
         setSharingBucket(newSharedBucket);
       }

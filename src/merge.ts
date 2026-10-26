@@ -152,3 +152,41 @@ export function replaceLibrary(current: AppData, imported: AppData, now: string 
 
   return { buckets: [...buckets, ...removedBuckets] };
 }
+
+/** The parts of a shared bucket that a content save writes (not membership). */
+export function bucketContentKey(bucket: Bucket): string {
+  return JSON.stringify({
+    name: bucket.name,
+    updatedAt: bucket.updatedAt,
+    deleted: bucket.deleted,
+    categories: bucket.categories
+  });
+}
+
+/**
+ * Take in shared buckets loaded from the server. `snapshot` holds each
+ * bucket's content as of the last load or save; a local bucket that differs
+ * from it has unsaved edits, which are merged on top of the server copy
+ * instead of being replaced (only where `uid` can still edit). Membership
+ * always comes from the server.
+ */
+export function mergeSharedBuckets(
+  current: Bucket[],
+  server: Bucket[],
+  snapshot: ReadonlyMap<string, string>,
+  uid: string
+): Bucket[] {
+  return server.map(serverBucket => {
+    const local = current.find(b => b.id === serverBucket.id);
+    const canWrite = (serverBucket.owners ?? []).some(o => o.id === uid && o.permission === 'write');
+    if (!local || !canWrite || bucketContentKey(local) === snapshot.get(local.id)) {
+      return serverBucket;
+    }
+    return {
+      ...mergeBucket(local, serverBucket),
+      isShared: true,
+      owners: serverBucket.owners,
+      createdBy: serverBucket.createdBy
+    };
+  });
+}

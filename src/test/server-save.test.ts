@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { AppData, Bookmark } from '../types';
-import { mergeData } from '../merge';
+import type { AppData, Bookmark, Bucket, SharedOwner } from '../types';
+import { bucketContentKey, mergeData, mergeSharedBuckets } from '../merge';
 
-// serverData.save against a fake Firestore transaction.
+// serverData.save and sharedBuckets.save against a fake Firestore transaction,
+// plus the pure shared-bucket merge.
 
 const h = vi.hoisted(() => ({
   serverDoc: null as null | { data: unknown },
@@ -36,10 +37,11 @@ vi.mock('firebase/firestore', () => ({
       data: () => h.serverDoc,
     }),
     set: (_ref: unknown, value: Record<string, unknown>) => { h.written = value; },
+    update: (_ref: unknown, value: Record<string, unknown>) => { h.written = value; },
   })),
 }));
 
-import { serverData } from '../api';
+import { serverData, sharedBuckets } from '../api';
 
 const bookmark = (id: string, overrides: Partial<Bookmark> = {}): Bookmark => ({
   id,
@@ -111,5 +113,84 @@ describe('mergeData names', () => {
     const server = library([], 'Server', '2026-10-02T00:00:00.000Z');
     expect(mergeData(local, server).buckets[0].name).toBe('Server');
     expect(mergeData(server, local).buckets[0].name).toBe('Server');
+  });
+});
+
+const owners: SharedOwner[] = [
+  { id: 'me', email: 'me@example.com', permission: 'write' },
+  { id: 'friend', email: 'friend@example.com', permission: 'write' },
+];
+
+const sharedBucket = (bookmarks: Bookmark[], extra: Partial<Bucket> = {}): Bucket => ({
+  id: 'shared-1',
+  name: 'Team',
+  categories: [{ id: 'c1', name: 'Links', bookmarks }],
+  isShared: true,
+  owners,
+  createdBy: 'me',
+  ...extra,
+});
+
+const ids = (bucket: Bucket) => bucket.categories[0].bookmarks.map(b => b.id);
+
+describe('sharedBuckets.save', () => {
+  beforeEach(() => {
+    h.serverDoc = null;
+    h.written = null;
+  });
+
+  it("keeps a collaborator's bookmark added since this device loaded the bucket", async () => {
+    h.serverDoc = {
+      data: undefined,
+      bucket: sharedBucket([bookmark('old'), bookmark('from-friend')]),
+      owners,
+      createdBy: 'me',
+    } as unknown as { data: unknown };
+
+    const result = await sharedBuckets.save('shared-1', sharedBucket([bookmark('old'), bookmark('mine')]));
+
+    expect(result.success).toBe(true);
+    expect(ids(h.written!.bucket as Bucket)).toEqual(['old', 'mine', 'from-friend']);
+    expect(ids(result.bucket!)).toEqual(['old', 'mine', 'from-friend']);
+    // Membership is left as the server has it
+    expect((h.written!.bucket as Bucket).owners).toEqual(owners);
+    expect(h.written!.ownerIds).toBeUndefined();
+  });
+});
+
+describe('mergeSharedBuckets', () => {
+  const loaded = sharedBucket([bookmark('old')]);
+  const snapshot = new Map([[loaded.id, bucketContentKey(loaded)]]);
+
+  it('takes the server copy when there are no local edits', () => {
+    const server = sharedBucket([bookmark('old'), bookmark('from-friend')]);
+    expect(mergeSharedBuckets([loaded], [server], snapshot, 'me')).toEqual([server]);
+  });
+
+  it('keeps an unsaved local edit on top of the server copy', () => {
+    const edited = sharedBucket([bookmark('old'), bookmark('mine')]);
+    const server = sharedBucket([bookmark('old'), bookmark('from-friend')]);
+    const [merged] = mergeSharedBuckets([edited], [server], snapshot, 'me');
+    expect(ids(merged)).toEqual(['old', 'mine', 'from-friend']);
+  });
+
+  it('drops local edits once this user can no longer edit', () => {
+    const edited = sharedBucket([bookmark('old'), bookmark('mine')]);
+    const server = sharedBucket([bookmark('old')], {
+      owners: [{ id: 'me', email: 'me@example.com', permission: 'read' }],
+    });
+    const [merged] = mergeSharedBuckets([edited], [server], snapshot, 'me');
+    expect(ids(merged)).toEqual(['old']);
+  });
+
+  it('drops buckets the server no longer lists for this user', () => {
+    expect(mergeSharedBuckets([loaded], [], snapshot, 'me')).toEqual([]);
+  });
+
+  it('takes membership from the server', () => {
+    const edited = sharedBucket([bookmark('old'), bookmark('mine')]);
+    const serverOwners = [...owners, { id: 'new', email: 'new@example.com', permission: 'read' as const }];
+    const [merged] = mergeSharedBuckets([edited], [sharedBucket([bookmark('old')], { owners: serverOwners })], snapshot, 'me');
+    expect(merged.owners).toEqual(serverOwners);
   });
 });
