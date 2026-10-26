@@ -2,15 +2,19 @@ import { onAuthStateChanged } from 'firebase/auth/web-extension';
 import type { User } from 'firebase/auth';
 import { createBookmark } from '../../src/storage';
 import { isWebUrl } from '../../src/url';
-import type { AppData } from '../../src/types';
 import { friendlyAuthError, oauthClientConfigured, requestSignIn, signOutOfExtension } from './auth';
 import { auth, firebaseConfigProblem } from './firebase';
-import { friendlySaveError, loadLibrary, saveBookmark } from './library';
+import { friendlySaveError, loadLibrary, saveBookmark, saveSharedBookmark } from './library';
 import {
-  activeBuckets,
   activeCategories,
+  allBuckets,
+  destinationBuckets,
+  emptyLibrary,
   filterBookmarks,
+  findDuplicate,
+  isSharedDestination,
   listBookmarks,
+  type Library,
   type ListedBookmark,
   type SaveInput,
 } from './mutate';
@@ -72,7 +76,7 @@ const listMore = required<HTMLElement>('list-more');
 let viewToken = 0;
 let saving = false;
 let currentUser: User | null = null;
-let library: AppData = { buckets: [] };
+let library: Library = emptyLibrary();
 let page: PageInfo | null = null;
 
 function init(): void {
@@ -131,7 +135,7 @@ async function onSignOut(): Promise<void> {
 function showSignedOut(): void {
   viewToken += 1;
   currentUser = null;
-  library = { buckets: [] };
+  library = emptyLibrary();
   loading.hidden = true;
   signedIn.hidden = true;
   signedOut.hidden = false;
@@ -178,7 +182,7 @@ async function showSignedIn(user: User): Promise<void> {
   page = pageResult.status === 'fulfilled'
     ? pageResult.value
     : { url: '', title: 'This page', description: '', saveable: false, reason: 'Could not read the current tab.' };
-  library = libraryResult.status === 'fulfilled' ? libraryResult.value : { buckets: [] };
+  library = libraryResult.status === 'fulfilled' ? libraryResult.value : emptyLibrary();
   const prefs = prefsResult.status === 'fulfilled' ? prefsResult.value : {};
 
   renderPage();
@@ -199,7 +203,7 @@ function renderPage(): void {
 }
 
 function renderDestination(prefs: Prefs): void {
-  const buckets = activeBuckets(library);
+  const buckets = destinationBuckets(library);
   if (buckets.length === 0) {
     bucketField.hidden = true;
     newBucketField.hidden = false;
@@ -213,12 +217,16 @@ function renderDestination(prefs: Prefs): void {
   const bucketId = prefs.bucketId && buckets.some((bucket) => bucket.id === prefs.bucketId)
     ? prefs.bucketId
     : buckets[0].id;
-  fillSelect(bucketSelect, buckets, bucketId);
+  fillSelect(
+    bucketSelect,
+    buckets.map((bucket) => ({ id: bucket.id, name: bucket.isShared ? `${bucket.name} (shared)` : bucket.name })),
+    bucketId,
+  );
   renderCategories(prefs.categoryId);
 }
 
 function renderCategories(preferredCategoryId?: string): void {
-  const bucket = activeBuckets(library).find((item) => item.id === bucketSelect.value);
+  const bucket = destinationBuckets(library).find((item) => item.id === bucketSelect.value);
   const categories = bucket ? activeCategories(bucket) : [];
   if (categories.length === 0) {
     categoryField.hidden = true;
@@ -240,7 +248,7 @@ function onBucketChange(): void {
 }
 
 function renderList(): void {
-  const listed = listBookmarks(library);
+  const listed = listBookmarks(allBuckets(library));
   const filtered = filterBookmarks(listed, searchInput.value);
   const shown = filtered.slice(0, LIST_LIMIT);
   count.textContent = String(listed.length);
@@ -264,7 +272,7 @@ function bookmarkRow(item: ListedBookmark): HTMLLIElement {
 
   const meta = document.createElement('span');
   meta.className = 'row-meta';
-  meta.textContent = `${item.bucketName} · ${item.categoryName}`;
+  meta.textContent = `${item.bucketName}${item.shared ? ' (shared)' : ''} · ${item.categoryName}`;
 
   const url = document.createElement('span');
   url.className = 'row-url';
@@ -287,11 +295,22 @@ async function onSave(): Promise<void> {
     return;
   }
 
+  // Shared buckets are separate documents, so the save itself only checks its
+  // own; check everything the popup knows about first.
+  const duplicate = findDuplicate(allBuckets(library).buckets, input.bookmark.url);
+  if (duplicate) {
+    setStatus(`Already saved in ${duplicate.bucketName} / ${duplicate.categoryName}.`, 'info');
+    return;
+  }
+
   saving = true;
   saveButton.disabled = true;
   setStatus('Saving…', '');
   try {
-    const result = await saveBookmark(currentUser.uid, input);
+    const toShared = input.mode !== 'new-bucket' && isSharedDestination(library, input.bucketId);
+    const result = input.mode !== 'new-bucket' && toShared
+      ? await saveSharedBookmark(currentUser.uid, input)
+      : await saveBookmark(currentUser.uid, input);
     if (result.status === 'duplicate') {
       setStatus(`Already saved in ${result.bucketName} / ${result.categoryName}.`, 'info');
       return;
@@ -303,7 +322,10 @@ async function onSave(): Promise<void> {
       setStatus('That bucket changed. Choose it again.', 'error');
       return;
     }
-    library = result.data;
+    const saved = result.data;
+    library = toShared
+      ? { ...library, shared: library.shared.map((bucket) => (bucket.id === result.bucketId ? saved.buckets[0] : bucket)) }
+      : { ...library, personal: saved };
     const prefs = { bucketId: result.bucketId, categoryId: result.categoryId };
     try {
       await savePrefs(prefs);
@@ -330,7 +352,7 @@ function readDestination(): SaveInput | null {
     tags: [],
     notes: '',
   });
-  const buckets = activeBuckets(library);
+  const buckets = destinationBuckets(library);
   if (buckets.length === 0) {
     return {
       mode: 'new-bucket',

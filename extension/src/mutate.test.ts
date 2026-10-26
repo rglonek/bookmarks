@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import type { AppData, Bookmark } from '../../src/types';
-import { activeBuckets, applySave, filterBookmarks, listBookmarks, normalizeUrl } from './mutate';
+import type { AppData, Bookmark, Bucket } from '../../src/types';
+import {
+  activeBuckets,
+  allBuckets,
+  applySave,
+  destinationBuckets,
+  filterBookmarks,
+  findDuplicate,
+  isSharedDestination,
+  listBookmarks,
+  normalizeUrl,
+  type Library,
+} from './mutate';
 
 function bookmark(overrides: Partial<Bookmark> & Pick<Bookmark, 'id' | 'url'>): Bookmark {
   return {
@@ -177,5 +188,40 @@ describe('applySave', () => {
       bookmark: bookmark({ id: 'bm-x', url: 'https://example.com/x' }),
     });
     expect(result).toEqual({ status: 'missing' });
+  });
+});
+
+describe('shared buckets', () => {
+  const sharedBucket = (id: string, name: string): Bucket => ({
+    id,
+    name,
+    isShared: true,
+    categories: [{ id: `${id}-cat`, name: 'Links', bookmarks: [bookmark({ id: `${id}-bm`, url: `https://example.com/${id}` })] }],
+  });
+  const withShared = (): Library => ({
+    personal: library(),
+    shared: [sharedBucket('team', 'Team'), sharedBucket('readonly', 'Board')],
+    writableShared: ['team'],
+  });
+
+  it('offers personal buckets and only the shared ones the user can edit', () => {
+    expect(destinationBuckets(withShared()).map((bucket) => bucket.name)).toEqual(['Team', 'Work']);
+    expect(isSharedDestination(withShared(), 'team')).toBe(true);
+    expect(isSharedDestination(withShared(), 'readonly')).toBe(false);
+    expect(isSharedDestination(withShared(), 'bucket-work')).toBe(false);
+  });
+
+  it('skips a personal copy deleted when the bucket was shared', () => {
+    const data = withShared();
+    data.personal.buckets.push({ id: 'team', name: 'Team', categories: [], deleted: true });
+    expect(destinationBuckets(data).filter((bucket) => bucket.id === 'team')).toHaveLength(1);
+  });
+
+  it('lists and finds bookmarks in shared buckets too', () => {
+    const items = listBookmarks(allBuckets(withShared()));
+    expect(items.find((item) => item.id === 'readonly-bm')).toMatchObject({ bucketName: 'Board', shared: true });
+    expect(items.find((item) => item.id === 'bm-1')?.shared).toBe(false);
+    expect(findDuplicate(allBuckets(withShared()).buckets, 'https://example.com/readonly/'))
+      .toEqual({ bucketName: 'Board', categoryName: 'Links' });
   });
 });

@@ -11,6 +11,34 @@ export interface ListedBookmark {
   bucketName: string;
   categoryName: string;
   updatedAt: string;
+  shared: boolean;
+}
+
+/** Everything the popup shows: the personal library plus shared buckets. */
+export interface Library {
+  personal: AppData;
+  shared: Bucket[];          // shared buckets the user is a member of
+  writableShared: string[];  // ids of the shared buckets the user can add to
+}
+
+export const emptyLibrary = (): Library => ({ personal: { buckets: [] }, shared: [], writableShared: [] });
+
+/** Personal and shared buckets together, for the list and duplicate checks. */
+export function allBuckets(library: Library): AppData {
+  return { buckets: [...library.personal.buckets, ...library.shared] };
+}
+
+/** Where a page can be saved: live personal buckets and editable shared ones, A-Z. */
+export function destinationBuckets(library: Library): Bucket[] {
+  const writable = new Set(library.writableShared);
+  return [
+    ...(library.personal.buckets ?? []).filter((bucket) => !bucket.deleted),
+    ...library.shared.filter((bucket) => !bucket.deleted && writable.has(bucket.id)),
+  ].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function isSharedDestination(library: Library, bucketId: string): boolean {
+  return library.writableShared.includes(bucketId) && library.shared.some((bucket) => bucket.id === bucketId);
 }
 
 export type SaveInput = {
@@ -76,6 +104,7 @@ export function listBookmarks(data: AppData): ListedBookmark[] {
           bucketName: bucket.name,
           categoryName: category.name,
           updatedAt: bookmark.updatedAt,
+          shared: bucket.isShared === true,
         });
       }
     }
@@ -100,7 +129,7 @@ export function filterBookmarks(items: ListedBookmark[], query: string): ListedB
 
 export function applySave(original: AppData, input: SaveInput): SaveResult {
   const buckets = original.buckets ?? [];
-  const duplicate = findActiveDuplicate(buckets, input.bookmark.url);
+  const duplicate = findDuplicate(buckets, input.bookmark.url);
   if (duplicate) return { status: 'duplicate', ...duplicate };
 
   if (input.mode !== 'new-bucket') {
@@ -168,7 +197,8 @@ function cleanName(name: string, fallback: string): string {
   return trimmed || fallback;
 }
 
-function findActiveDuplicate(buckets: Bucket[], url: string): { bucketName: string; categoryName: string } | null {
+/** Where a live bookmark with this URL is already saved, if anywhere. */
+export function findDuplicate(buckets: Bucket[], url: string): { bucketName: string; categoryName: string } | null {
   const needle = normalizeUrl(url);
   for (const bucket of buckets) {
     if (bucket.deleted) continue;

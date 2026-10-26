@@ -2,7 +2,7 @@
 
 Toolbar button for the bookmarks app. It saves the current page into one of your buckets and lists the pages already in your library.
 
-The extension reads and writes the same Firestore document as the website: `users/{uid}/data/bookmarks` in the `bookmarks` database. A save runs inside a transaction, so it picks up a change that landed after the popup opened.
+The extension reads and writes the same Firestore data as the website, in the `bookmarks` database: your library at `users/{uid}/data/bookmarks`, and the shared buckets you belong to in `sharedBuckets`. Each save runs inside a transaction on the document it changes, so it picks up a change that landed after the popup opened.
 
 ## Build
 
@@ -38,6 +38,7 @@ If Firebase rejects the token, add `chrome-extension://emldoalioaoegilfkjddcobbj
 
 Open a normal http or https page and click the toolbar icon.
 
-- **Save bookmark** stores the page title, URL, and meta description in the bucket and category you pick. The popup remembers that choice. The first save can create an Inbox bucket and an Unsorted category.
-- The library lists your pages, newest first. Search covers title, URL, description, notes, tags, bucket, and category. Click a row to open it.
-- A page that is already saved is left as it is.
+- **Save bookmark** stores the page title, URL, and meta description in the bucket and category you pick, including shared buckets you can edit (marked "shared"). The popup remembers that choice. The first save can create an Inbox bucket and an Unsorted category.
+- The library lists your pages and those in shared buckets, newest first. Search covers title, URL, description, notes, tags, bucket, and category. Click a row to open it.
+- A page that is already saved anywhere in your library or shared buckets is left as it is.
+- Sign-in runs in the extension's background worker, because Chrome's account window closes the popup.
