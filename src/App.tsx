@@ -10,6 +10,10 @@ import { normalizeLibrary } from './normalize';
 
 type ViewMode = 'card' | 'grid' | 'list';
 
+// Rename/delete/share/edit buttons on list items: shown on mouse hover and on
+// keyboard focus, and always on touch screens, which have no hover.
+const ITEM_ACTIONS = 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100 transition';
+
 // Shown in a banner when syncing fails for a reason other than being offline
 const SYNC_PROBLEM_MESSAGES: Record<Exclude<SyncFailure, 'unreachable'>, string> = {
   denied: 'The cloud refused your changes (permission denied). They are kept on this device. Signing out and back in usually fixes this.',
@@ -1763,7 +1767,7 @@ function App() {
                             )}
                           </div>
                         )}
-                        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition">
+                        <div className={`flex gap-1 ${ITEM_ACTIONS}`}>
                           {/* Share button - only show for users with write permission */}
                           {user && userHasWritePermission(bucket) && (
                             <button
@@ -1891,7 +1895,7 @@ function App() {
                               </>
                             )}
                             {userHasWritePermission(currentBucket) && (
-                              <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition">
+                              <div className={`flex gap-1 ${ITEM_ACTIONS}`}>
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation();
@@ -2544,7 +2548,7 @@ function BookmarkCard({
           )}
         </div>
         {canEdit && (
-          <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition">
+          <div className={`flex gap-1 ${ITEM_ACTIONS}`}>
             <button onClick={onEdit} className="text-blue-500 hover:text-blue-700 px-2">✏️</button>
             <button onClick={onDelete} className="text-red-500 hover:text-red-700 px-2">🗑️</button>
           </div>
@@ -2568,7 +2572,7 @@ function BookmarkCard({
         <div className="flex justify-between items-start mb-2">
           <h3 className="font-semibold text-sm truncate flex-1 pr-2">{bookmark.title}</h3>
           {canEdit && (
-            <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition">
+            <div className={`flex gap-1 ${ITEM_ACTIONS}`}>
               <button onClick={onEdit} className="text-blue-500 hover:text-blue-700 text-xs">✏️</button>
               <button onClick={onDelete} className="text-red-500 hover:text-red-700 text-xs">🗑️</button>
             </div>
@@ -2611,7 +2615,7 @@ function BookmarkCard({
       <div className="flex justify-between items-start mb-2">
         <h3 className="font-semibold text-lg truncate flex-1">{bookmark.title}</h3>
         {canEdit && (
-          <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition">
+          <div className={`flex gap-1 ${ITEM_ACTIONS}`}>
             <button onClick={onEdit} className="text-blue-500 hover:text-blue-700 px-2">✏️</button>
             <button onClick={onDelete} className="text-red-500 hover:text-red-700 px-2">🗑️</button>
           </div>
