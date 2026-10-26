@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { AppData, Bucket, Category, Bookmark, SharedOwner, SharePermission } from './types';
-import { storage, createBucket, createCategory, createBookmark } from './storage';
+import { storage, createBucket, createCategory, createBookmark, generateId } from './storage';
+import { replaceLibrary } from './merge';
 import { extractMetadata, auth, serverData, sharedBuckets, userProfile } from './api';
 import { User } from 'firebase/auth';
 
@@ -779,10 +780,17 @@ function App() {
           return;
         }
         
-        // Remove from personal buckets and add to shared
+        // Mark the personal copy deleted rather than dropping it, so other
+        // devices' merges don't bring it back as a personal bucket. Its
+        // contents now live in the shared bucket.
+        const convertedAt = new Date().toISOString();
         setData(prev => ({
           ...prev,
-          buckets: prev.buckets.filter(b => b.id !== sharingBucket.id)
+          buckets: prev.buckets.map(b =>
+            b.id === sharingBucket.id
+              ? { ...b, categories: [], deleted: true, deletedAt: convertedAt }
+              : b
+          )
         }));
         
         const newSharedBucket: Bucket = {
@@ -1278,7 +1286,9 @@ function App() {
         const importedData = JSON.parse(e.target?.result as string);
         if (importedData.buckets && Array.isArray(importedData.buckets)) {
           if (confirm('This will replace all existing data. Are you sure?')) {
-            setData(importedData);
+            // Keep what the file doesn't contain as deleted records, so the
+            // replacement also reaches the cloud and other devices.
+            setData(prev => replaceLibrary(prev, importedData));
             alert('Data imported successfully!');
           }
         } else {
@@ -2171,14 +2181,24 @@ function App() {
             
             // If bookmark is being moved to a different location
             if (editingBookmark && (targetBucketId !== currentBucket.id || targetCategoryId !== currentCategory.id)) {
-              // Delete from old location
+              // Mark the old copy deleted (dropping it would let other devices'
+              // merges restore it) and add the bookmark at the new location
+              // under a new id.
+              const movedAt = new Date().toISOString();
               const removeFromBuckets = (buckets: Bucket[]) => buckets.map(bucket =>
                 bucket.id === currentBucket.id
                   ? {
                       ...bucket,
                       categories: bucket.categories.map(category =>
                         category.id === currentCategory.id
-                          ? { ...category, bookmarks: category.bookmarks.filter(b => b.id !== editingBookmark.id) }
+                          ? {
+                              ...category,
+                              bookmarks: category.bookmarks.map(b =>
+                                b.id === editingBookmark.id
+                                  ? { ...b, deleted: true, deletedAt: movedAt, updatedAt: movedAt }
+                                  : b
+                              )
+                            }
                           : category
                       )
                     }
@@ -2194,9 +2214,9 @@ function App() {
               // Add to new location with updated data
               const updatedBookmark = {
                 ...bookmarkData,
-                id: editingBookmark.id,
+                id: generateId(),
                 createdAt: editingBookmark.createdAt,
-                updatedAt: new Date().toISOString()
+                updatedAt: movedAt
               };
               
               const addToBuckets = (buckets: Bucket[]) => buckets.map(bucket =>
