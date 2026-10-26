@@ -1,6 +1,7 @@
 import { onAuthStateChanged } from 'firebase/auth/web-extension';
 import type { User } from 'firebase/auth';
 import { createBookmark } from '../../src/storage';
+import { isWebUrl } from '../../src/url';
 import type { AppData } from '../../src/types';
 import { friendlyAuthError, oauthClientConfigured, signInWithGoogle, signOutOfExtension } from './auth';
 import { auth, firebaseConfigProblem } from './firebase';
@@ -262,7 +263,8 @@ function bookmarkRow(item: ListedBookmark): HTMLLIElement {
 
   button.append(title, meta, url);
   button.addEventListener('click', () => {
-    void chrome.tabs.create({ url: item.url });
+    // The library can hold entries added on the website; open web links only
+    if (isWebUrl(item.url)) void chrome.tabs.create({ url: item.url });
   });
   row.append(button);
   return row;

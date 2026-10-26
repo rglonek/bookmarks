@@ -4,6 +4,7 @@ import { storage, createBucket, createCategory, createBookmark, generateId } fro
 import { bucketContentKey, mergeBucket, mergeData, mergeSharedBuckets, pruneTombstones, replaceLibrary } from './merge';
 import { extractMetadata, auth, serverData, sharedBuckets, userProfile } from './api';
 import { User } from 'firebase/auth';
+import { isWebUrl } from './url';
 
 type ViewMode = 'card' | 'grid' | 'list';
 
@@ -12,6 +13,8 @@ const openExternalLink = (url: string, e?: React.MouseEvent) => {
   if (e) {
     e.preventDefault();
   }
+  // Never open javascript:, data: or other non-web links
+  if (!isWebUrl(url)) return;
   // Use window.open with _system or _blank to force external browser
   // On iOS PWA, this helps open in Safari instead of in-app
   window.open(url, '_blank', 'noopener,noreferrer');
@@ -379,17 +382,18 @@ function App() {
         }
       }
       
-      if (url) {
+      // Only web links can be saved
+      if (url && isWebUrl(url)) {
         setSharedUrl({ 
           url, 
           title: sharedTitle, 
           text: sharedText 
         });
         setShowAddSharedBookmarkModal(true);
-        
-        // Clean the URL to remove the share params
-        window.history.replaceState({}, document.title, '/');
       }
+      
+      // Clean the URL to remove the share params
+      window.history.replaceState({}, document.title, '/');
     }
   }, []);
   
@@ -2473,7 +2477,7 @@ function BookmarkCard({
               )}
             </div>
             <a
-              href={bookmark.url}
+              href={isWebUrl(bookmark.url) ? bookmark.url : undefined}
               target="_blank"
               rel="noopener noreferrer"
               onClick={(e) => openExternalLink(bookmark.url, e)}
@@ -2520,7 +2524,7 @@ function BookmarkCard({
           )}
         </div>
         <a
-          href={bookmark.url}
+          href={isWebUrl(bookmark.url) ? bookmark.url : undefined}
           target="_blank"
           rel="noopener noreferrer"
           onClick={(e) => openExternalLink(bookmark.url, e)}
@@ -2568,7 +2572,7 @@ function BookmarkCard({
         </p>
       )}
       <a
-        href={bookmark.url}
+        href={isWebUrl(bookmark.url) ? bookmark.url : undefined}
         target="_blank"
         rel="noopener noreferrer"
         onClick={(e) => openExternalLink(bookmark.url, e)}
@@ -2629,6 +2633,7 @@ function BookmarkModal({
     bucketId: currentBucketId,
     categoryId: currentCategoryId
   });
+  const [urlError, setUrlError] = useState<string | null>(null);
   
   // Get categories for selected bucket
   const selectedBucket = allBuckets.find(b => b.id === formData.bucketId);
@@ -2636,6 +2641,7 @@ function BookmarkModal({
 
   const handleUrlChange = async (url: string) => {
     setFormData(prev => ({ ...prev, url }));
+    setUrlError(null);
 
     if (url.trim() && url.startsWith('http') && isAuthenticated) {
       const metadata = await onExtract(url);
@@ -2651,6 +2657,10 @@ function BookmarkModal({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isWebUrl(formData.url)) {
+      setUrlError('Enter a web address starting with http:// or https://');
+      return;
+    }
     if (formData.title.trim() && formData.url.trim() && formData.bucketId && formData.categoryId) {
       onSave({
         title: formData.title.trim(),
@@ -2682,6 +2692,9 @@ function BookmarkModal({
               />
               {isExtracting && (
                 <p className="text-sm text-indigo-600 mt-1">Extracting metadata...</p>
+              )}
+              {urlError && (
+                <p className="text-sm text-red-600 mt-1">{urlError}</p>
               )}
               {!isAuthenticated && (
                 <p className="text-sm text-gray-500 mt-1">Sign in to auto-fill title and description</p>
