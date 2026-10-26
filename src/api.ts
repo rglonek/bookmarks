@@ -179,6 +179,10 @@ export const serverData = {
   }
 };
 
+// Email -> user ID index used for sharing. Not 'emailLookup': entries in that
+// older collection could be written by anyone and are no longer trusted.
+const EMAIL_INDEX = 'emailIndex';
+
 // User profile management (for email lookup when sharing)
 export const userProfile = {
   // Register user's email for lookup
@@ -186,8 +190,9 @@ export const userProfile = {
     if (!user.email) return;
     
     try {
-      // Store in emailLookup collection (email as doc ID)
-      const emailDocRef = doc(db, 'emailLookup', user.email.toLowerCase());
+      // Store in the email index (email as doc ID). Rules only accept the
+      // signed-in user's own verified address.
+      const emailDocRef = doc(db, EMAIL_INDEX, user.email.toLowerCase());
       await setDoc(emailDocRef, {
         userId: user.uid,
         email: user.email.toLowerCase(),
@@ -211,7 +216,7 @@ export const userProfile = {
   // Look up user by email
   async findByEmail(email: string): Promise<{ userId: string; email: string; displayName: string } | null> {
     try {
-      const emailDocRef = doc(db, 'emailLookup', email.toLowerCase());
+      const emailDocRef = doc(db, EMAIL_INDEX, email.trim().toLowerCase());
       const docSnap = await getDoc(emailDocRef);
       
       if (docSnap.exists()) {
