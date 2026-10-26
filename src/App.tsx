@@ -1087,6 +1087,8 @@ function App() {
               category.id === categoryId
                 ? {
                     ...category,
+                    // The later reorder wins when copies merge
+                    orderUpdatedAt: new Date().toISOString(),
                     bookmarks: (() => {
                       const bookmarks = [...category.bookmarks];
                       const draggedIndex = bookmarks.findIndex(b => b.id === draggedBookmark.bookmarkId);
@@ -1147,6 +1149,8 @@ function App() {
               category.id === categoryId
                 ? {
                     ...category,
+                    // The later reorder wins when copies merge
+                    orderUpdatedAt: new Date().toISOString(),
                     bookmarks: (() => {
                       const bookmarks = [...category.bookmarks];
                       const draggedIndex = bookmarks.findIndex(b => b.id === draggedBookmark.bookmarkId);

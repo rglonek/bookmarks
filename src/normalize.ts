@@ -63,16 +63,18 @@ export function normalizeCategory(value: unknown, now: string = new Date().toISO
   if (!isObject(value)) return null;
   const bookmarks = normalizeList(value.bookmarks, item => normalizeBookmark(item, now));
   const wellFormed = typeof value.id === 'string' && typeof value.name === 'string' &&
-    optionalBoolean(value.deleted) && optionalString(value.deletedAt) && optionalString(value.updatedAt);
+    optionalBoolean(value.deleted) && optionalString(value.deletedAt) && optionalString(value.updatedAt) &&
+    optionalString(value.orderUpdatedAt);
   if (wellFormed && !bookmarks.changed) return value as unknown as Category;
 
-  const { deleted: _deleted, deletedAt: _deletedAt, ...rest } = value;
+  const { deleted: _deleted, deletedAt: _deletedAt, updatedAt: _updatedAt, orderUpdatedAt: _orderUpdatedAt, ...rest } = value;
   return {
     ...rest,
     id: text(value.id) || generateId(),
     name: text(value.name) || 'Untitled',
     bookmarks: bookmarks.items,
     ...(typeof value.updatedAt === 'string' ? { updatedAt: value.updatedAt } : {}),
+    ...(typeof value.orderUpdatedAt === 'string' ? { orderUpdatedAt: value.orderUpdatedAt } : {}),
     ...deletion(value, now),
   } as Category;
 }
@@ -85,7 +87,7 @@ export function normalizeBucket(value: unknown, now: string = new Date().toISOSt
   if (wellFormed && !categories.changed) return value as unknown as Bucket;
 
   // Other fields (shared-bucket owners and so on) are kept as they are
-  const { deleted: _deleted, deletedAt: _deletedAt, ...rest } = value;
+  const { deleted: _deleted, deletedAt: _deletedAt, updatedAt: _updatedAt, ...rest } = value;
   return {
     ...rest,
     id: text(value.id) || generateId(),

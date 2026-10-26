@@ -16,6 +16,7 @@ export interface Category {
   name: string;
   bookmarks: Bookmark[];
   updatedAt?: string;   // Set when renamed; the later rename wins on merge
+  orderUpdatedAt?: string;  // Set when bookmarks are reordered; the later order wins on merge
   deleted?: boolean;
   deletedAt?: string;
 }

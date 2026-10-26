@@ -18,7 +18,9 @@ function newerName(local: { name: string; updatedAt?: string }, server: { name: 
   return { name: server.name, updatedAt: server.updatedAt };
 }
 
-function mergeBookmarks(local: Bookmark[], server: Bookmark[]): Bookmark[] {
+// The order comes from the side that reordered last (see orderUpdatedAt);
+// records only the other side has follow in their own order.
+function mergeBookmarks(local: Bookmark[], server: Bookmark[], serverOrderWins = false): Bookmark[] {
   const merged = new Map<string, Bookmark>();
   local.forEach(bm => merged.set(bm.id, { ...bm }));
 
@@ -40,8 +42,12 @@ function mergeBookmarks(local: Bookmark[], server: Bookmark[]): Bookmark[] {
     }
   });
 
-  return Array.from(merged.values());
+  const [first, second] = serverOrderWins ? [server, local] : [local, server];
+  const ids = [...new Set([...first.map(bm => bm.id), ...second.map(bm => bm.id)])];
+  return ids.map(id => merged.get(id)!);
 }
+
+const later = (a?: string, b?: string) => ((a ?? '') > (b ?? '') ? a : b);
 
 function mergeCategories(local: Category[], server: Category[]): Category[] {
   const merged = new Map<string, Category>();
@@ -54,10 +60,13 @@ function mergeCategories(local: Category[], server: Category[]): Category[] {
       merged.set(serverCat.id, { ...serverCat });
       return;
     }
+    const serverOrderWins = (serverCat.orderUpdatedAt ?? '') > (localCat.orderUpdatedAt ?? '');
+    const orderUpdatedAt = later(localCat.orderUpdatedAt, serverCat.orderUpdatedAt);
     merged.set(serverCat.id, {
       ...localCat,
       ...newerName(localCat, serverCat),
-      bookmarks: mergeBookmarks(localCat.bookmarks ?? [], serverCat.bookmarks ?? []),
+      bookmarks: mergeBookmarks(localCat.bookmarks ?? [], serverCat.bookmarks ?? [], serverOrderWins),
+      ...(orderUpdatedAt ? { orderUpdatedAt } : {}),
       deleted: localCat.deleted || serverCat.deleted,
       deletedAt: localCat.deletedAt || serverCat.deletedAt
     });

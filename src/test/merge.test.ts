@@ -377,3 +377,32 @@ describe('Merge Logic', () => {
   });
 });
 
+
+describe('bookmark order', () => {
+  const bm = (id: string) => ({
+    id, title: id, url: `https://example.com/${id}`, description: '', tags: [], notes: '',
+    createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+  });
+  const lib = (ids: string[], orderUpdatedAt?: string): AppData => ({
+    buckets: [{ id: 'b', name: 'B', categories: [{ id: 'c', name: 'C', bookmarks: ids.map(bm), ...(orderUpdatedAt ? { orderUpdatedAt } : {}) }] }],
+  });
+  const order = (data: AppData) => data.buckets[0].categories[0].bookmarks.map(b => b.id);
+
+  it("takes the other device's order when it reordered later", () => {
+    const thisDevice = lib(['a', 'b', 'c', 'mine']);
+    const otherDevice = lib(['c', 'a', 'b'], '2026-10-26T10:00:00.000Z');
+    const merged = mergeData(thisDevice, otherDevice);
+    expect(order(merged)).toEqual(['c', 'a', 'b', 'mine']);
+    expect(merged.buckets[0].categories[0].orderUpdatedAt).toBe('2026-10-26T10:00:00.000Z');
+  });
+
+  it('keeps this device order when it reordered later', () => {
+    const thisDevice = lib(['b', 'a'], '2026-10-26T11:00:00.000Z');
+    const otherDevice = lib(['a', 'b', 'theirs'], '2026-10-26T10:00:00.000Z');
+    expect(order(mergeData(thisDevice, otherDevice))).toEqual(['b', 'a', 'theirs']);
+  });
+
+  it('keeps this device order when neither side has reordered', () => {
+    expect(order(mergeData(lib(['a', 'b']), lib(['b', 'a', 'x'])))).toEqual(['a', 'b', 'x']);
+  });
+});
