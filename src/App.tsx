@@ -735,6 +735,19 @@ function App() {
     setShareSuccess(null);
     
     try {
+      // Find the person before changing anything, so a typo (or someone who
+      // hasn't signed in yet) doesn't leave the bucket converted to shared
+      // with nobody else in it
+      const target = await userProfile.findByEmail(shareEmail.trim());
+      if (!target) {
+        setShareError('User not found. They must sign in at least once before you can share with them.');
+        return;
+      }
+      if (target.userId === user.uid) {
+        setShareError('That is your own account.');
+        return;
+      }
+
       // Check if this bucket is already shared
       const isAlreadyShared = sharingBucket.isShared;
       
