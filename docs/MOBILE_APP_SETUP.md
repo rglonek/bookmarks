@@ -72,6 +72,13 @@ project files, so do them once:
 
 Google sign-in must be enabled in Firebase Authentication, as for the website.
 
+## Sharing links to the app
+
+On Android the app appears in the share sheet for links and text. `MainActivity`
+opens the app with the shared text, and the same "Save Shared Link" dialog as the
+PWA share target appears. On iOS this would need a Share Extension target in
+Xcode, which isn't set up.
+
 ## Building for Release
 
 ### iOS (App Store)
