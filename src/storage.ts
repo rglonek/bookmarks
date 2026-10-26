@@ -1,4 +1,8 @@
 import { AppData, Bucket, Category, Bookmark } from './types';
+import { generateId } from './id';
+import { normalizeBucket, normalizeLibrary } from './normalize';
+
+export { generateId };
 
 // Shared buckets cached for offline use, with each bucket's content as of the
 // last server load or save (to tell which have unsaved edits).
@@ -22,7 +26,7 @@ export const storage = {
     try {
       const data = localStorage.getItem(keyFor(userId));
       if (data) {
-        return JSON.parse(data);
+        return normalizeLibrary(JSON.parse(data)) ?? { buckets: [] };
       }
     } catch (_error) {
       // Invalid JSON, return empty data
@@ -42,7 +46,10 @@ export const storage = {
     try {
       const value = JSON.parse(localStorage.getItem(`${SHARED_KEY}:${userId}`) || 'null');
       if (value && Array.isArray(value.buckets) && Array.isArray(value.snapshot)) {
-        return value;
+        return {
+          buckets: value.buckets.map((b: unknown) => normalizeBucket(b)).filter((b: Bucket | null): b is Bucket => b !== null),
+          snapshot: value.snapshot,
+        };
       }
     } catch (_error) {
       // Invalid JSON, return empty cache
@@ -57,10 +64,6 @@ export const storage = {
   clearShared(userId: string): void {
     localStorage.removeItem(`${SHARED_KEY}:${userId}`);
   }
-};
-
-export const generateId = (): string => {
-  return Date.now().toString(36) + Math.random().toString(36).substring(2);
 };
 
 export const createBucket = (name: string): Bucket => ({

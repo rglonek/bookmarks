@@ -27,6 +27,7 @@ import {
 } from 'firebase/firestore';
 import { mergeBucket, mergeData, pruneTombstones } from './merge';
 import { assertSyncable, LibraryTooLargeError } from './limits';
+import { normalizeBucket, normalizeLibrary } from './normalize';
 import { httpsCallable } from 'firebase/functions';
 
 export interface MetadataResponse {
@@ -159,11 +160,9 @@ export const auth = {
 // Firestore data storage API
 const libraryDoc = (userId: string) => doc(db, 'users', userId, 'data', 'bookmarks');
 
+// Repairs malformed records so one bad entry can't crash every device
 function asAppData(value: unknown): AppData {
-  if (value && typeof value === 'object' && Array.isArray((value as AppData).buckets)) {
-    return value as AppData;
-  }
-  return { buckets: [] };
+  return normalizeLibrary(value) ?? { buckets: [] };
 }
 
 // Marker for "has the server copy changed since I last saw it". Every writer
@@ -319,9 +318,11 @@ export const sharedBuckets = {
       const buckets: Bucket[] = [];
       querySnapshot.forEach((doc) => {
         const data = doc.data() as SharedBucketDoc;
+        // Repair malformed content written by any member's client
+        const bucket = normalizeBucket({ ...data.bucket, id: doc.id });
+        if (!bucket) return;
         buckets.push({
-          ...data.bucket,
-          id: doc.id,
+          ...bucket,
           isShared: true,
           owners: data.owners,
           createdBy: data.createdBy
@@ -392,7 +393,8 @@ export const sharedBuckets = {
           throw new Error('Shared bucket not found');
         }
         const docData = docSnap.data() as SharedBucketDoc;
-        const combined = mergeBucket(bucket, { ...docData.bucket, id: bucketId });
+        const serverBucket = normalizeBucket({ ...docData.bucket, id: bucketId }) ?? { id: bucketId, name: bucket.name, categories: [] };
+        const combined = mergeBucket(bucket, serverBucket);
         const result: Bucket = {
           ...(pruneTombstones({ buckets: [combined] }).buckets[0] ?? combined),
           id: bucketId,

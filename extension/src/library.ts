@@ -3,6 +3,7 @@ import type { AppData } from '../../src/types';
 import { applySave, type SaveInput, type SaveResult } from './mutate';
 import { auth, db } from './firebase';
 import { assertSyncable, LibraryTooLargeError } from '../../src/limits';
+import { normalizeLibrary } from '../../src/normalize';
 
 function userDoc(userId: string) {
   if (!db) throw new Error('Firebase is not configured.');
@@ -15,11 +16,10 @@ function requireUser(userId: string): void {
   }
 }
 
+// Repairs malformed records (missing titles, dates, tags) that would
+// otherwise break the popup's list
 function asAppData(value: unknown): AppData {
-  if (!value || typeof value !== 'object' || !Array.isArray((value as AppData).buckets)) {
-    return { buckets: [] };
-  }
-  return { buckets: (value as AppData).buckets };
+  return normalizeLibrary(value) ?? { buckets: [] };
 }
 
 export async function loadLibrary(userId: string): Promise<AppData> {

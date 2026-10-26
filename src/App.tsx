@@ -6,6 +6,7 @@ import { extractMetadata, auth, serverData, sharedBuckets, userProfile, syncFail
 import { User } from 'firebase/auth';
 import { isWebUrl, parseSharedLink } from './url';
 import { formatMegabytes, jsonBytes, MAX_SYNC_BYTES } from './limits';
+import { normalizeLibrary } from './normalize';
 
 type ViewMode = 'card' | 'grid' | 'list';
 
@@ -1223,8 +1224,10 @@ function App() {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
-        const importedData = JSON.parse(e.target?.result as string);
-        if (importedData.buckets && Array.isArray(importedData.buckets)) {
+        // Repair or drop malformed records rather than letting them crash
+        // the app (and, once synced, every device)
+        const importedData = normalizeLibrary(JSON.parse(e.target?.result as string));
+        if (importedData) {
           // Keep what the file doesn't contain as deleted records, so the
           // replacement also reaches the cloud and other devices.
           const next = replaceLibrary(data, importedData);
