@@ -4,7 +4,7 @@ import { storage, createBucket, createCategory, createBookmark, generateId } fro
 import { bucketContentKey, mergeBucket, mergeData, mergeSharedBuckets, pruneTombstones, replaceLibrary } from './merge';
 import { extractMetadata, auth, serverData, sharedBuckets, userProfile, syncFailureOf, type SyncFailure } from './api';
 import { User } from 'firebase/auth';
-import { isWebUrl } from './url';
+import { isWebUrl, parseSharedLink } from './url';
 import { formatMegabytes, jsonBytes, MAX_SYNC_BYTES } from './limits';
 
 type ViewMode = 'card' | 'grid' | 'list';
@@ -416,34 +416,17 @@ function App() {
 
   // Handle Share Target API - receive shared links from other apps
   useEffect(() => {
-    const urlParams = new URLSearchParams(window.location.search);
-    const sharedUrlParam = urlParams.get('url');
-    const sharedTitle = urlParams.get('title') || '';
-    const sharedText = urlParams.get('text') || '';
-    
-    if (sharedUrlParam) {
-      // Extract URL from text if not provided directly (some apps put URL in text)
-      let url = sharedUrlParam;
-      if (!url && sharedText) {
-        const urlMatch = sharedText.match(/https?:\/\/[^\s]+/);
-        if (urlMatch) {
-          url = urlMatch[0];
-        }
-      }
-      
-      // Only web links can be saved
-      if (url && isWebUrl(url)) {
-        setSharedUrl({ 
-          url, 
-          title: sharedTitle, 
-          text: sharedText 
-        });
-        setShowAddSharedBookmarkModal(true);
-      }
-      
-      // Clean the URL to remove the share params
-      window.history.replaceState({}, document.title, '/');
+    const shared = parseSharedLink(window.location.search);
+    if (shared === undefined) return; // not opened by a share
+
+    // Only web links can be saved
+    if (shared) {
+      setSharedUrl(shared);
+      setShowAddSharedBookmarkModal(true);
     }
+
+    // Clean the URL to remove the share params
+    window.history.replaceState({}, document.title, '/');
   }, []);
   
   // Window focus/blur handlers for periodic sync

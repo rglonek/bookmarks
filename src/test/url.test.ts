@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isWebUrl } from '../url';
+import { isWebUrl, parseSharedLink } from '../url';
 
 describe('isWebUrl', () => {
   it('accepts http and https links', () => {
@@ -20,5 +20,29 @@ describe('isWebUrl', () => {
   it('rejects things that are not URLs', () => {
     expect(isWebUrl('')).toBe(false);
     expect(isWebUrl('example.com')).toBe(false);
+  });
+});
+
+describe('parseSharedLink', () => {
+  it('ignores a normal page load', () => {
+    expect(parseSharedLink('')).toBeUndefined();
+    expect(parseSharedLink('?foo=bar')).toBeUndefined();
+  });
+
+  it('uses the url parameter when there is one', () => {
+    expect(parseSharedLink('?url=https%3A%2F%2Fexample.com%2Fa&title=A&text=Read%20this'))
+      .toEqual({ url: 'https://example.com/a', title: 'A', text: 'Read this' });
+  });
+
+  it('finds the link inside text when url is empty, as many Android apps send it', () => {
+    expect(parseSharedLink('?title=Article&text=Worth%20reading%3A%20https%3A%2F%2Fexample.com%2Fpost.'))
+      .toEqual({ url: 'https://example.com/post', title: 'Article', text: 'Worth reading:' });
+    expect(parseSharedLink('?url=&text=https%3A%2F%2Fexample.com'))
+      .toEqual({ url: 'https://example.com', title: '', text: '' });
+  });
+
+  it('returns null for a share without a web link', () => {
+    expect(parseSharedLink('?text=just%20words')).toBeNull();
+    expect(parseSharedLink('?url=javascript%3Aalert(1)')).toBeNull();
   });
 });
