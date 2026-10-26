@@ -2,7 +2,7 @@ import { onAuthStateChanged } from 'firebase/auth/web-extension';
 import type { User } from 'firebase/auth';
 import { createBookmark } from '../../src/storage';
 import { isWebUrl } from '../../src/url';
-import { friendlyAuthError, oauthClientConfigured, requestSignIn, signOutOfExtension } from './auth';
+import { accountPickerConfigured, friendlyAuthError, oauthClientConfigured, requestSignIn, signOutOfExtension } from './auth';
 import { auth, firebaseConfigProblem } from './firebase';
 import { friendlySaveError, loadLibrary, saveBookmark, saveSharedBookmark } from './library';
 import {
@@ -156,13 +156,15 @@ function showSignedOut(): void {
   oauthHelp.hidden = oauthReady;
   oauthHelp.textContent = oauthReady
     ? ''
-    : 'Create a Chrome extension OAuth client for this extension ID in the same Google Cloud project as Firebase. Set VITE_EXTENSION_OAUTH_CLIENT_ID in .env, run npm run build:extension, and reload.';
+    : 'Create an OAuth client for this extension ID in the same Google Cloud project as Firebase (see extension/README.md). Set it in .env, run npm run build:extension, and reload.';
   extensionIdRow.hidden = oauthReady;
   extensionId.textContent = chrome.runtime.id;
   intro.hidden = !ready;
-  intro.textContent = ready
-    ? 'Use the same Google account as the website. Chrome asks you to choose when more than one account is signed in.'
-    : '';
+  intro.textContent = !ready
+    ? ''
+    : accountPickerConfigured()
+      ? 'Use the same Google account as the website. Google asks which account to use.'
+      : 'Use the same Google account as the website. Sign-in uses the accounts signed in to this Chrome profile.';
   signInButton.hidden = !ready;
 }
 

@@ -30,7 +30,21 @@ VITE_EXTENSION_OAUTH_CLIENT_ID=your-id.apps.googleusercontent.com
 
 6. Run `npm run build:extension` again and click Reload on the extension card.
 
-Google sign-in must already be enabled in Firebase Authentication. Sign in with the same Google account you use on the website. When Chrome has more than one account, it asks you to pick one.
+Google sign-in must already be enabled in Firebase Authentication. Sign in with the same Google account you use on the website. This client signs in with an account that is signed in to the Chrome profile.
+
+### Optional: pick any Google account
+
+To choose any Google account at sign-in (and switch accounts after signing out), also create a **Web application** OAuth client in the same project:
+
+1. Google Cloud Console → APIs & Services → Credentials → Create OAuth client ID → **Web application**.
+2. Under Authorized redirect URIs, add `https://emldoalioaoegilfkjddcobbjhfjdckk.chromiumapp.org/`.
+3. Add the client ID to `.env` and rebuild:
+
+```bash
+VITE_EXTENSION_WEB_CLIENT_ID=your-web-id.apps.googleusercontent.com
+```
+
+With this set, sign-in opens Google's account picker instead of using the Chrome profile, and the Chrome extension client above is optional.
 
 If Firebase rejects the token, add `chrome-extension://emldoalioaoegilfkjddcobbjhfjdckk` under Authentication → Settings → Authorized domains.
 
