@@ -1,5 +1,6 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider } from 'firebase/auth';
+import { getAuth, initializeAuth, indexedDBLocalPersistence, GoogleAuthProvider, type Auth } from 'firebase/auth';
+import { Capacitor } from '@capacitor/core';
 import { getFirestore } from 'firebase/firestore';
 import { getFunctions } from 'firebase/functions';
 
@@ -15,11 +16,25 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID || 'YOUR_APP_ID',
 };
 
+// Without a config the app still runs in local mode (placeholders keep Firebase
+// from failing at start-up), but sign-in and sync can't work, so say so.
+if (!import.meta.env.VITE_FIREBASE_API_KEY || !import.meta.env.VITE_FIREBASE_PROJECT_ID) {
+  console.warn(
+    'Firebase is not configured: set the VITE_FIREBASE_* values in .env (see .env.example) and rebuild. ' +
+    'Until then sign-in and cloud sync will not work; bookmarks stay on this device.'
+  );
+}
+
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
 // Initialize Firebase services
-export const auth = getAuth(app);
+// In the native app, getAuth() waits on the web popup/redirect helper, which
+// can't load inside the WebView. Sign-in there goes through the native plugin
+// instead (see api.ts), so the web auth only needs to keep the session.
+export const auth: Auth = Capacitor.isNativePlatform()
+  ? initializeAuth(app, { persistence: indexedDBLocalPersistence })
+  : getAuth(app);
 export const db = getFirestore(app, 'bookmarks');
 export const functions = getFunctions(app);
 

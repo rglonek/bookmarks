@@ -13,8 +13,8 @@
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
     "test:coverage": "vitest run --coverage",
-    "lint": "eslint src/",
-    "lint:fix": "eslint src/ --fix",
+    "lint": "eslint src/ extension/src/",
+    "lint:fix": "eslint src/ extension/src/ --fix",
     "lint:test": "eslint src/test/",
     "deploy": "npm run build && firebase deploy",
     "deploy:hosting": "npm run build && firebase deploy --only hosting",
@@ -26,11 +26,11 @@
     "cap:build": "npm run build && npx cap sync"
   },
   "dependencies": {
+    "@capacitor-firebase/authentication": "^7.5.0",
     "@capacitor/android": "^7.4.4",
     "@capacitor/core": "^7.4.4",
     "@capacitor/ios": "^7.4.4",
-    "firebase": "^10.7.0",
-    "firebase-tools": "^14.26.0",
+    "firebase": "^11.10.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },
@@ -51,6 +51,7 @@
     "eslint": "^9.39.1",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",
+    "firebase-tools": "^14.26.0",
     "globals": "^16.5.0",
     "jsdom": "^27.2.0",
     "postcss": "^8.4.32",

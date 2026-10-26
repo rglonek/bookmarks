@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
+const EXTENSION_ICON_SIZES = [16, 32, 48, 128];
 
 function extensionIdFromKey(publicKey: string): string {
   const digest = createHash('sha256').update(Buffer.from(publicKey, 'base64')).digest();
@@ -38,17 +39,20 @@ function extensionAssets(clientId: string): Plugin {
           default_title: 'Bookmarks',
           default_popup: 'popup.html',
           default_icon: {
-            16: 'icons/icon128.png',
-            32: 'icons/icon128.png',
-            48: 'icons/icon128.png',
-            128: 'icons/icon128.png',
+            16: 'icons/icon-16.png',
+            32: 'icons/icon-32.png',
+            48: 'icons/icon-48.png',
+            128: 'icons/icon-128.png',
           },
         },
         icons: {
-          16: 'icons/icon128.png',
-          48: 'icons/icon128.png',
-          128: 'icons/icon128.png',
+          16: 'icons/icon-16.png',
+          32: 'icons/icon-32.png',
+          48: 'icons/icon-48.png',
+          128: 'icons/icon-128.png',
         },
+        // Runs the interactive sign-in, which would close the popup midway
+        background: { service_worker: 'background.js', type: 'module' },
         permissions: ['identity', 'storage', 'activeTab', 'scripting'],
       };
 
@@ -63,9 +67,13 @@ function extensionAssets(clientId: string): Plugin {
       }
 
       writeFileSync(resolve(dist, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+      // Each size is its own file (made by scripts/generate-icons.cjs); Chrome
+      // shows them at 16-128px and downscaling one large icon looks blurry
       const iconsDir = resolve(dist, 'icons');
       mkdirSync(iconsDir, { recursive: true });
-      copyFileSync(resolve(root, 'public/icons/icon-192.png'), resolve(iconsDir, 'icon128.png'));
+      for (const size of EXTENSION_ICON_SIZES) {
+        copyFileSync(resolve(root, `extension/icons/icon-${size}.png`), resolve(iconsDir, `icon-${size}.png`));
+      }
       console.log(`Chrome extension ID: ${extensionIdFromKey(publicKey)}`);
     },
   };
@@ -85,9 +93,12 @@ export default defineConfig(({ mode }) => {
       modulePreload: false,
       sourcemap: false,
       rollupOptions: {
-        input: resolve(root, 'extension/popup.html'),
+        input: {
+          popup: resolve(root, 'extension/popup.html'),
+          background: resolve(root, 'extension/src/background.ts'),
+        },
         output: {
-          entryFileNames: 'popup.js',
+          entryFileNames: '[name].js',
           chunkFileNames: 'chunks/[name].js',
           assetFileNames: 'assets/[name][extname]',
         },

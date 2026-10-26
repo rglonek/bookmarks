@@ -2,7 +2,7 @@
 
 Toolbar button for the bookmarks app. It saves the current page into one of your buckets and lists the pages already in your library.
 
-The extension reads and writes the same Firestore document as the website: `users/{uid}/data/bookmarks` in the `bookmarks` database. A save runs inside a transaction, so it picks up a change that landed after the popup opened.
+The extension reads and writes the same Firestore data as the website, in the `bookmarks` database: your library at `users/{uid}/data/bookmarks`, and the shared buckets you belong to in `sharedBuckets`. Each save runs inside a transaction on the document it changes, so it picks up a change that landed after the popup opened.
 
 ## Build
 
@@ -30,7 +30,21 @@ VITE_EXTENSION_OAUTH_CLIENT_ID=your-id.apps.googleusercontent.com
 
 6. Run `npm run build:extension` again and click Reload on the extension card.
 
-Google sign-in must already be enabled in Firebase Authentication. Sign in with the same Google account you use on the website. When Chrome has more than one account, it asks you to pick one.
+Google sign-in must already be enabled in Firebase Authentication. Sign in with the same Google account you use on the website. This client signs in with an account that is signed in to the Chrome profile.
+
+### Optional: pick any Google account
+
+To choose any Google account at sign-in (and switch accounts after signing out), also create a **Web application** OAuth client in the same project:
+
+1. Google Cloud Console → APIs & Services → Credentials → Create OAuth client ID → **Web application**.
+2. Under Authorized redirect URIs, add `https://emldoalioaoegilfkjddcobbjhfjdckk.chromiumapp.org/`.
+3. Add the client ID to `.env` and rebuild:
+
+```bash
+VITE_EXTENSION_WEB_CLIENT_ID=your-web-id.apps.googleusercontent.com
+```
+
+With this set, sign-in opens Google's account picker instead of using the Chrome profile, and the Chrome extension client above is optional.
 
 If Firebase rejects the token, add `chrome-extension://emldoalioaoegilfkjddcobbjhfjdckk` under Authentication → Settings → Authorized domains.
 
@@ -38,6 +52,7 @@ If Firebase rejects the token, add `chrome-extension://emldoalioaoegilfkjddcobbj
 
 Open a normal http or https page and click the toolbar icon.
 
-- **Save bookmark** stores the page title, URL, and meta description in the bucket and category you pick. The popup remembers that choice. The first save can create an Inbox bucket and an Unsorted category.
-- The library lists your pages, newest first. Search covers title, URL, description, notes, tags, bucket, and category. Click a row to open it.
-- A page that is already saved is left as it is.
+- **Save bookmark** stores the page title, URL, and meta description in the bucket and category you pick, including shared buckets you can edit (marked "shared"). The popup remembers that choice. The first save can create an Inbox bucket and an Unsorted category.
+- The library lists your pages and those in shared buckets, newest first. Search covers title, URL, description, notes, tags, bucket, and category. Click a row to open it.
+- A page that is already saved anywhere in your library or shared buckets is left as it is.
+- Sign-in runs in the extension's background worker, because Chrome's account window closes the popup.

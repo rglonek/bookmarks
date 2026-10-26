@@ -2,7 +2,7 @@
   "name": "bookmarks-functions",
   "description": "Cloud Functions for Bookmarks App",
   "engines": {
-    "node": "20"
+    "node": "22"
   },
   "main": "index.js",
   "type": "module",

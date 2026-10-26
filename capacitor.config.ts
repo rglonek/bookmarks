@@ -26,8 +26,8 @@ const config: CapacitorConfig = {
   
   // Android specific settings  
   android: {
-    // Allow mixed content for development
-    allowMixedContent: true,
+    // Mixed content (http resources inside the app's https WebView) stays
+    // off: every Firebase and Google endpoint the app uses is https.
     // Capture external links in the app
     captureInput: true,
     // Use hardware back button
@@ -36,6 +36,14 @@ const config: CapacitorConfig = {
   
   // Plugins configuration
   plugins: {
+    // Native Google sign-in. Google blocks its sign-in page inside WebViews,
+    // so the app signs in natively and passes the token to the Firebase JS SDK
+    // (skipNativeAuth). Needs google-services.json / GoogleService-Info.plist;
+    // see docs/MOBILE_APP_SETUP.md.
+    FirebaseAuthentication: {
+      skipNativeAuth: true,
+      providers: ['google.com']
+    },
     // Splash screen settings
     SplashScreen: {
       launchShowDuration: 2000,

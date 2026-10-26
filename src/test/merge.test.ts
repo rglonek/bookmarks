@@ -1,70 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import type { AppData, Bucket, Category, Bookmark } from '../types';
+import type { AppData } from '../types';
+import { mergeData } from '../merge';
 
-// Extract merge logic for testing
-function mergeData(localData: AppData, serverData: AppData): AppData {
-  const mergedBuckets = new Map<string, Bucket>();
-  
-  localData.buckets.forEach(bucket => {
-    mergedBuckets.set(bucket.id, { ...bucket });
-  });
-  
-  serverData.buckets.forEach(serverBucket => {
-    if (mergedBuckets.has(serverBucket.id)) {
-      const localBucket = mergedBuckets.get(serverBucket.id)!;
-      const mergedCategories = new Map<string, Category>();
-      
-      localBucket.categories.forEach(cat => {
-        mergedCategories.set(cat.id, { ...cat });
-      });
-      
-      serverBucket.categories.forEach(serverCat => {
-        if (mergedCategories.has(serverCat.id)) {
-          const localCat = mergedCategories.get(serverCat.id)!;
-          const mergedBookmarks = new Map<string, Bookmark>();
-          
-          localCat.bookmarks.forEach(bm => {
-            mergedBookmarks.set(bm.id, { ...bm });
-          });
-          
-          serverCat.bookmarks.forEach(serverBm => {
-            if (mergedBookmarks.has(serverBm.id)) {
-              const localBm = mergedBookmarks.get(serverBm.id)!;
-              const localTime = new Date(localBm.updatedAt).getTime();
-              const serverTime = new Date(serverBm.updatedAt).getTime();
-              
-              if (serverTime > localTime) {
-                mergedBookmarks.set(serverBm.id, { ...serverBm });
-              }
-            } else {
-              mergedBookmarks.set(serverBm.id, { ...serverBm });
-            }
-          });
-          
-          mergedCategories.set(serverCat.id, {
-            ...localCat,
-            name: serverCat.name,
-            bookmarks: Array.from(mergedBookmarks.values())
-          });
-        } else {
-          mergedCategories.set(serverCat.id, { ...serverCat });
-        }
-      });
-      
-      mergedBuckets.set(serverBucket.id, {
-        ...localBucket,
-        name: serverBucket.name,
-        categories: Array.from(mergedCategories.values())
-      });
-    } else {
-      mergedBuckets.set(serverBucket.id, { ...serverBucket });
-    }
-  });
-  
-  return {
-    buckets: Array.from(mergedBuckets.values())
-  };
-}
 
 describe('Merge Logic', () => {
   describe('mergeData', () => {
@@ -440,3 +377,32 @@ describe('Merge Logic', () => {
   });
 });
 
+
+describe('bookmark order', () => {
+  const bm = (id: string) => ({
+    id, title: id, url: `https://example.com/${id}`, description: '', tags: [], notes: '',
+    createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+  });
+  const lib = (ids: string[], orderUpdatedAt?: string): AppData => ({
+    buckets: [{ id: 'b', name: 'B', categories: [{ id: 'c', name: 'C', bookmarks: ids.map(bm), ...(orderUpdatedAt ? { orderUpdatedAt } : {}) }] }],
+  });
+  const order = (data: AppData) => data.buckets[0].categories[0].bookmarks.map(b => b.id);
+
+  it("takes the other device's order when it reordered later", () => {
+    const thisDevice = lib(['a', 'b', 'c', 'mine']);
+    const otherDevice = lib(['c', 'a', 'b'], '2026-10-26T10:00:00.000Z');
+    const merged = mergeData(thisDevice, otherDevice);
+    expect(order(merged)).toEqual(['c', 'a', 'b', 'mine']);
+    expect(merged.buckets[0].categories[0].orderUpdatedAt).toBe('2026-10-26T10:00:00.000Z');
+  });
+
+  it('keeps this device order when it reordered later', () => {
+    const thisDevice = lib(['b', 'a'], '2026-10-26T11:00:00.000Z');
+    const otherDevice = lib(['a', 'b', 'theirs'], '2026-10-26T10:00:00.000Z');
+    expect(order(mergeData(thisDevice, otherDevice))).toEqual(['b', 'a', 'theirs']);
+  });
+
+  it('keeps this device order when neither side has reordered', () => {
+    expect(order(mergeData(lib(['a', 'b']), lib(['b', 'a', 'x'])))).toEqual(['a', 'b', 'x']);
+  });
+});

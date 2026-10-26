@@ -11,6 +11,34 @@ export interface ListedBookmark {
   bucketName: string;
   categoryName: string;
   updatedAt: string;
+  shared: boolean;
+}
+
+/** Everything the popup shows: the personal library plus shared buckets. */
+export interface Library {
+  personal: AppData;
+  shared: Bucket[];          // shared buckets the user is a member of
+  writableShared: string[];  // ids of the shared buckets the user can add to
+}
+
+export const emptyLibrary = (): Library => ({ personal: { buckets: [] }, shared: [], writableShared: [] });
+
+/** Personal and shared buckets together, for the list and duplicate checks. */
+export function allBuckets(library: Library): AppData {
+  return { buckets: [...library.personal.buckets, ...library.shared] };
+}
+
+/** Where a page can be saved: live personal buckets and editable shared ones, A-Z. */
+export function destinationBuckets(library: Library): Bucket[] {
+  const writable = new Set(library.writableShared);
+  return [
+    ...(library.personal.buckets ?? []).filter((bucket) => !bucket.deleted),
+    ...library.shared.filter((bucket) => !bucket.deleted && writable.has(bucket.id)),
+  ].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function isSharedDestination(library: Library, bucketId: string): boolean {
+  return library.writableShared.includes(bucketId) && library.shared.some((bucket) => bucket.id === bucketId);
 }
 
 export type SaveInput = {
@@ -76,6 +104,7 @@ export function listBookmarks(data: AppData): ListedBookmark[] {
           bucketName: bucket.name,
           categoryName: category.name,
           updatedAt: bookmark.updatedAt,
+          shared: bucket.isShared === true,
         });
       }
     }
@@ -100,7 +129,7 @@ export function filterBookmarks(items: ListedBookmark[], query: string): ListedB
 
 export function applySave(original: AppData, input: SaveInput): SaveResult {
   const buckets = original.buckets ?? [];
-  const duplicate = findActiveDuplicate(buckets, input.bookmark.url);
+  const duplicate = findDuplicate(buckets, input.bookmark.url);
   if (duplicate) return { status: 'duplicate', ...duplicate };
 
   if (input.mode !== 'new-bucket') {
@@ -114,44 +143,35 @@ export function applySave(original: AppData, input: SaveInput): SaveResult {
 
   const data = JSON.parse(JSON.stringify({ buckets })) as AppData;
 
+  // "New" bucket and category names reuse a live one with the same name, so a
+  // popup that couldn't see it (stale view, failed load) doesn't add a second
+  // "Inbox". This runs inside the save transaction, on the latest data.
+  let bucket: Bucket | undefined;
   if (input.mode === 'new-bucket') {
     const bucketName = cleanName(input.bucketName, 'Inbox');
-    const categoryName = cleanName(input.categoryName, 'Unsorted');
-    const category = createCategory(categoryName);
-    category.bookmarks = [input.bookmark];
-    const bucket = createBucket(bucketName);
-    bucket.categories = [category];
-    data.buckets = [...data.buckets, bucket];
-    return {
-      status: 'added',
-      data,
-      bucketId: bucket.id,
-      categoryId: category.id,
-      bucketName,
-      categoryName,
-    };
+    bucket = data.buckets.find((item) => !item.deleted && sameName(item.name, bucketName));
+    if (!bucket) {
+      bucket = createBucket(bucketName);
+      data.buckets = [...data.buckets, bucket];
+    }
+  } else {
+    bucket = data.buckets.find((item) => item.id === input.bucketId && !item.deleted);
   }
-
-  const bucket = data.buckets.find((item) => item.id === input.bucketId && !item.deleted);
   if (!bucket) return { status: 'missing' };
 
-  if (input.mode === 'new-category') {
+  let category: Category | undefined;
+  if (input.mode === 'existing') {
+    category = (bucket.categories ?? []).find((item) => item.id === input.categoryId && !item.deleted);
+    if (!category) return { status: 'missing' };
+  } else {
     const categoryName = cleanName(input.categoryName, 'Unsorted');
-    const category = createCategory(categoryName);
-    category.bookmarks = [input.bookmark];
-    bucket.categories = [...(bucket.categories ?? []), category];
-    return {
-      status: 'added',
-      data,
-      bucketId: bucket.id,
-      categoryId: category.id,
-      bucketName: bucket.name,
-      categoryName,
-    };
+    category = (bucket.categories ?? []).find((item) => !item.deleted && sameName(item.name, categoryName));
+    if (!category) {
+      category = createCategory(categoryName);
+      bucket.categories = [...(bucket.categories ?? []), category];
+    }
   }
 
-  const category = (bucket.categories ?? []).find((item) => item.id === input.categoryId && !item.deleted);
-  if (!category) return { status: 'missing' };
   category.bookmarks = [...(category.bookmarks ?? []), input.bookmark];
   return {
     status: 'added',
@@ -163,12 +183,15 @@ export function applySave(original: AppData, input: SaveInput): SaveResult {
   };
 }
 
+const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+
 function cleanName(name: string, fallback: string): string {
   const trimmed = name.trim();
   return trimmed || fallback;
 }
 
-function findActiveDuplicate(buckets: Bucket[], url: string): { bucketName: string; categoryName: string } | null {
+/** Where a live bookmark with this URL is already saved, if anywhere. */
+export function findDuplicate(buckets: Bucket[], url: string): { bucketName: string; categoryName: string } | null {
   const needle = normalizeUrl(url);
   for (const bucket of buckets) {
     if (bucket.deleted) continue;

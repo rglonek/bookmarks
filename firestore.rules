@@ -2,17 +2,31 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+    // The signed-in user's own verified email address, lowercased.
+    function hasVerifiedEmail() {
+      return request.auth != null &&
+             request.auth.token.email is string &&
+             request.auth.token.email_verified == true;
+    }
+
+    function ownEmail() {
+      return request.auth.token.email.lower();
+    }
+
     // User data - only the authenticated user can read/write their own data
     match /users/{userId}/data/{document=**} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
     }
-    
-    // User profile - stores email lookup for sharing
+
+    // User profile - display info shown to people you share with
     match /userProfiles/{userId} {
-      // Anyone authenticated can read (for email lookup)
-      allow read: if request.auth != null;
-      // Only the user can write their own profile
-      allow write: if request.auth != null && request.auth.uid == userId;
+      // Anyone authenticated can fetch one profile by uid, but not list them
+      allow get: if request.auth != null;
+      // Only the user can write their own profile, with their own verified email
+      allow create, update: if hasVerifiedEmail() &&
+                               request.auth.uid == userId &&
+                               request.resource.data.email == ownEmail();
+      allow delete: if request.auth != null && request.auth.uid == userId;
     }
     
     // Shared buckets - accessible by all owners, writable by writers only
@@ -31,28 +45,68 @@ service cloud.firestore {
                request.auth.uid in resource.data.writerIds;
       }
       
+      // createdBy and createdAt are set once, at creation
+      function keepsCreationFields() {
+        return request.resource.data.createdBy == resource.data.createdBy &&
+               request.resource.data.get('createdAt', null) == resource.data.get('createdAt', null);
+      }
+
+      // Everyone who can edit must also be a member
+      function writersAreMembers() {
+        return request.resource.data.ownerIds is list &&
+               request.resource.data.writerIds is list &&
+               request.resource.data.ownerIds.hasAll(request.resource.data.writerIds);
+      }
+
+      // While the creator is a member, only the creator can remove themselves
+      function keepsCreatorUnlessLeaving() {
+        return !(resource.data.createdBy in resource.data.ownerIds) ||
+               resource.data.createdBy in request.resource.data.ownerIds ||
+               request.auth.uid == resource.data.createdBy;
+      }
+
+      // A view-only member may only take themselves out of the bucket
+      function isLeavingOnly() {
+        let before = resource.data;
+        let after = request.resource.data;
+        return after.diff(before).affectedKeys().hasOnly(['ownerIds', 'owners', 'bucket', 'lastModified']) &&
+               after.ownerIds.toSet() == before.ownerIds.toSet().difference([request.auth.uid].toSet()) &&
+               before.owners.hasAll(after.owners) &&
+               after.bucket.diff(before.bucket).affectedKeys().hasOnly(['owners']);
+      }
+
       // Allow read if user is in ownerIds array (all users with any access)
       allow read: if hasAccess();
-      // Allow update if user is in ownerIds (any user can update - for leaving or content)
-      // Client code enforces that read-only users can only remove themselves
-      allow update: if hasAccess();
-      // Allow delete if user has write access OR is the last person
-      allow delete: if request.auth != null && (
-        hasWriteAccess() ||
-        (resource.data.ownerIds != null && resource.data.ownerIds.size() == 1)
-      );
-      // Allow create if user is authenticated and adds themselves as writer
-      allow create: if request.auth != null && 
-                       request.resource.data.writerIds != null &&
-                       request.auth.uid in request.resource.data.writerIds;
+      // Writers can edit content and manage sharing; view-only members can only leave
+      allow update: if (hasWriteAccess() &&
+                        keepsCreationFields() &&
+                        writersAreMembers() &&
+                        keepsCreatorUnlessLeaving()) ||
+                       (hasAccess() && isLeavingOnly());
+      // Only the last remaining member can delete the bucket
+      allow delete: if hasAccess() && resource.data.ownerIds.size() == 1;
+      // A new shared bucket starts with only its creator, so nobody can push a
+      // bucket into another user's list without being shared on it first
+      allow create: if request.auth != null &&
+                       request.resource.data.createdBy == request.auth.uid &&
+                       request.resource.data.ownerIds == [request.auth.uid] &&
+                       request.resource.data.writerIds == [request.auth.uid];
     }
     
-    // Email to user ID lookup (for sharing by email)
-    match /emailLookup/{email} {
-      // Anyone authenticated can read (to find users by email)
-      allow read: if request.auth != null;
-      // Only the owner can write their email mapping
-      allow write: if request.auth != null && request.resource.data.userId == request.auth.uid;
+    // Email to user ID lookup (for sharing by email).
+    // Replaces the old emailLookup collection, which anyone could write to point
+    // another person's address at their own account. emailLookup now falls
+    // through to the deny-all rule below, so its old entries are never read.
+    match /emailIndex/{email} {
+      // Anyone authenticated can look up one exact address, but not list them
+      allow get: if request.auth != null;
+      // Only the verified owner of an address can map it, and only to themselves
+      allow create, update: if hasVerifiedEmail() &&
+                               email == ownEmail() &&
+                               request.resource.data.email == email &&
+                               request.resource.data.userId == request.auth.uid &&
+                               request.resource.data.keys().hasOnly(['userId', 'email', 'displayName', 'updatedAt']);
+      allow delete: if request.auth != null && resource.data.userId == request.auth.uid;
     }
     
     // Deny all other access by default

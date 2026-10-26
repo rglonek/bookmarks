@@ -2,10 +2,13 @@ import { AppData, Bucket, SharedBucketDoc, SharedOwner, SharePermission } from '
 import { auth as firebaseAuth, db, functions, googleProvider } from './firebase';
 import { 
   signInWithPopup, 
+  signInWithCredential,
   signOut, 
   onAuthStateChanged,
+  GoogleAuthProvider,
   User
 } from 'firebase/auth';
+import { Capacitor } from '@capacitor/core';
 import { 
   doc, 
   getDoc, 
@@ -19,13 +22,45 @@ import {
   where,
   getDocs,
   arrayUnion,
-  arrayRemove
+  arrayRemove,
+  runTransaction
 } from 'firebase/firestore';
+import { mergeBucket, mergeData, pruneTombstones } from './merge';
+import { assertSyncable, LibraryTooLargeError } from './limits';
+import { normalizeBucket, normalizeLibrary } from './normalize';
 import { httpsCallable } from 'firebase/functions';
 
 export interface MetadataResponse {
   title: string;
   description: string;
+}
+
+// Why a Firestore call failed, in terms the app can act on:
+// - unreachable: offline or the backend didn't answer; retrying later helps
+// - denied: rules refused it (signed out, or access changed)
+// - too-large: the document would exceed Firestore's 1 MiB limit
+// - failed: anything else
+export type SyncFailure = 'unreachable' | 'denied' | 'too-large' | 'failed';
+
+export function syncFailureOf(error: unknown): SyncFailure {
+  const code = error && typeof error === 'object' && 'code' in error
+    ? String((error as { code: unknown }).code)
+    : '';
+  const message = error instanceof Error ? error.message : '';
+  if (error instanceof LibraryTooLargeError) return 'too-large';
+  switch (code) {
+    case 'unavailable':
+    case 'deadline-exceeded':
+    case 'cancelled':
+      return 'unreachable';
+    case 'permission-denied':
+    case 'unauthenticated':
+      return 'denied';
+  }
+  if (code === 'invalid-argument' && /size|too large|exceeds/i.test(message)) {
+    return 'too-large';
+  }
+  return 'failed';
 }
 
 // Cloud Function for metadata extraction
@@ -59,6 +94,21 @@ export const auth = {
   // Sign in with Google
   async signInWithGoogle(): Promise<{ success: boolean; user?: User; error?: string }> {
     try {
+      if (Capacitor.isNativePlatform()) {
+        // Google blocks its sign-in page inside embedded WebViews, so the
+        // native app signs in with the platform's Google SDK and hands the
+        // token to the Firebase JS SDK.
+        const { FirebaseAuthentication } = await import('@capacitor-firebase/authentication');
+        const native = await FirebaseAuthentication.signInWithGoogle({ skipNativeAuth: true });
+        const idToken = native.credential?.idToken;
+        if (!idToken) {
+          throw new Error('Google sign-in did not return a token.');
+        }
+        const credential = GoogleAuthProvider.credential(idToken, native.credential?.accessToken);
+        const result = await signInWithCredential(firebaseAuth, credential);
+        return { success: true, user: result.user };
+      }
+
       const result = await signInWithPopup(firebaseAuth, googleProvider);
       return { success: true, user: result.user };
     } catch (error) {
@@ -71,52 +121,48 @@ export const auth = {
   // Sign out
   async signOut(): Promise<void> {
     try {
+      if (Capacitor.isNativePlatform()) {
+        // Also end the native Google session so the account picker shows next time
+        const { FirebaseAuthentication } = await import('@capacitor-firebase/authentication');
+        await FirebaseAuthentication.signOut();
+      }
       await signOut(firebaseAuth);
     } catch (error) {
       console.error('Sign-out error:', error);
     }
-  },
-
-  // Legacy methods for backwards compatibility during migration
-  // These can be removed after full migration
-  async register(_username: string, _password: string): Promise<{ success: boolean; error?: string }> {
-    // Not used with Google Sign-In
-    return { success: false, error: 'Please use Google Sign-In' };
-  },
-
-  async login(_username: string, _password: string): Promise<{ success: boolean; token?: string; username?: string; error?: string }> {
-    // Not used with Google Sign-In
-    return { success: false, error: 'Please use Google Sign-In' };
-  },
-
-  async logout(_token: string): Promise<void> {
-    await this.signOut();
-  },
-
-  async checkSession(_token: string): Promise<{ username?: string; error?: string }> {
-    const user = firebaseAuth.currentUser;
-    if (user) {
-      return { username: user.displayName || user.email || 'User' };
-    }
-    return { error: 'Not authenticated' };
   }
 };
 
 // Firestore data storage API
+const libraryDoc = (userId: string) => doc(db, 'users', userId, 'data', 'bookmarks');
+
+// Repairs malformed records so one bad entry can't crash every device
+function asAppData(value: unknown): AppData {
+  return normalizeLibrary(value) ?? { buckets: [] };
+}
+
+// Marker for "has the server copy changed since I last saw it". Every writer
+// (this app and the Chrome extension) stamps updatedAt with an ISO time, and a
+// save returns the stamp it wrote, so this device's own save doesn't look like
+// a remote change. Older documents only have the server timestamp.
+function changeMarker(docData: Record<string, unknown>): string | null {
+  if (typeof docData.updatedAt === 'string') return docData.updatedAt;
+  const lastModified = docData.lastModified;
+  if (lastModified instanceof Timestamp) return lastModified.toDate().toISOString();
+  return typeof lastModified === 'string' ? lastModified : null;
+}
+
 export const serverData = {
   // Load user data from Firestore
-  async load(userId: string): Promise<{ data?: AppData; lastModified?: string | null; error?: string }> {
+  async load(userId: string): Promise<{ data?: AppData; lastModified?: string | null; error?: string; failure?: SyncFailure }> {
     try {
-      const docRef = doc(db, 'users', userId, 'data', 'bookmarks');
-      const docSnap = await getDoc(docRef);
+      const docSnap = await getDoc(libraryDoc(userId));
 
       if (docSnap.exists()) {
         const docData = docSnap.data();
         return {
-          data: docData.data as AppData,
-          lastModified: docData.lastModified instanceof Timestamp 
-            ? docData.lastModified.toDate().toISOString()
-            : docData.lastModified || null
+          data: asAppData(docData.data),
+          lastModified: changeMarker(docData)
         };
       }
 
@@ -127,57 +173,61 @@ export const serverData = {
       };
     } catch (error) {
       console.error('Error loading data from Firestore:', error);
-      return { error: 'Failed to load data' };
+      return { error: 'Failed to load data', failure: syncFailureOf(error) };
     }
   },
 
-  // Save user data to Firestore
-  async save(userId: string, data: AppData): Promise<{ success: boolean; lastModified?: string; error?: string }> {
+  // Save user data to Firestore. The save merges with the server copy inside a
+  // transaction instead of overwriting it, so changes saved elsewhere since
+  // this device last pulled (another device, the Chrome extension) are kept.
+  // Returns the merged library that was written.
+  async save(userId: string, data: AppData): Promise<{ success: boolean; data?: AppData; lastModified?: string; error?: string; failure?: SyncFailure }> {
     try {
-      const docRef = doc(db, 'users', userId, 'data', 'bookmarks');
+      const docRef = libraryDoc(userId);
       const now = new Date().toISOString();
-      
-      // Clean data to remove undefined values (Firestore doesn't accept undefined)
-      const cleanData = JSON.parse(JSON.stringify(data));
-      
-      await setDoc(docRef, {
-        data: cleanData,
-        lastModified: serverTimestamp(),
-        updatedAt: now
+
+      const merged = await runTransaction(db, async (transaction) => {
+        const docSnap = await transaction.get(docRef);
+        const serverCopy = docSnap.exists() ? asAppData(docSnap.data().data) : { buckets: [] };
+        const result = pruneTombstones(mergeData(data, serverCopy));
+        // Remove undefined values (Firestore doesn't accept undefined)
+        const cleanData = JSON.parse(JSON.stringify(result));
+        // Fail with a clear error rather than Firestore's size rejection
+        assertSyncable(cleanData);
+        transaction.set(docRef, {
+          data: cleanData,
+          lastModified: serverTimestamp(),
+          updatedAt: now
+        });
+        return result;
       });
 
       return { 
         success: true, 
+        data: merged,
         lastModified: now 
       };
     } catch (error) {
       console.error('Error saving data to Firestore:', error);
-      return { success: false, error: 'Failed to save data' };
+      return { success: false, error: 'Failed to save data', failure: syncFailureOf(error) };
     }
   },
 
   // Check last modified timestamp
-  async check(userId: string): Promise<{ lastModified?: string | null; error?: string }> {
+  async check(userId: string): Promise<{ lastModified?: string | null; error?: string; failure?: SyncFailure }> {
     try {
-      const docRef = doc(db, 'users', userId, 'data', 'bookmarks');
-      const docSnap = await getDoc(docRef);
-
-      if (docSnap.exists()) {
-        const docData = docSnap.data();
-        return {
-          lastModified: docData.lastModified instanceof Timestamp 
-            ? docData.lastModified.toDate().toISOString()
-            : docData.lastModified || null
-        };
-      }
-
-      return { lastModified: null };
+      const docSnap = await getDoc(libraryDoc(userId));
+      return { lastModified: docSnap.exists() ? changeMarker(docSnap.data()) : null };
     } catch (error) {
       console.error('Error checking data:', error);
-      return { error: 'Failed to check data' };
+      return { error: 'Failed to check data', failure: syncFailureOf(error) };
     }
   }
 };
+
+// Email -> user ID index used for sharing. Not 'emailLookup': entries in that
+// older collection could be written by anyone and are no longer trusted.
+const EMAIL_INDEX = 'emailIndex';
 
 // User profile management (for email lookup when sharing)
 export const userProfile = {
@@ -186,8 +236,9 @@ export const userProfile = {
     if (!user.email) return;
     
     try {
-      // Store in emailLookup collection (email as doc ID)
-      const emailDocRef = doc(db, 'emailLookup', user.email.toLowerCase());
+      // Store in the email index (email as doc ID). Rules only accept the
+      // signed-in user's own verified address.
+      const emailDocRef = doc(db, EMAIL_INDEX, user.email.toLowerCase());
       await setDoc(emailDocRef, {
         userId: user.uid,
         email: user.email.toLowerCase(),
@@ -211,7 +262,7 @@ export const userProfile = {
   // Look up user by email
   async findByEmail(email: string): Promise<{ userId: string; email: string; displayName: string } | null> {
     try {
-      const emailDocRef = doc(db, 'emailLookup', email.toLowerCase());
+      const emailDocRef = doc(db, EMAIL_INDEX, email.trim().toLowerCase());
       const docSnap = await getDoc(emailDocRef);
       
       if (docSnap.exists()) {
@@ -234,7 +285,7 @@ export const userProfile = {
 // Shared buckets API
 export const sharedBuckets = {
   // Load all shared buckets for a user
-  async loadAll(userId: string): Promise<{ buckets: Bucket[]; error?: string }> {
+  async loadAll(userId: string): Promise<{ buckets: Bucket[]; error?: string; failure?: SyncFailure }> {
     try {
       const sharedBucketsRef = collection(db, 'sharedBuckets');
       const q = query(sharedBucketsRef, where('ownerIds', 'array-contains', userId));
@@ -243,9 +294,11 @@ export const sharedBuckets = {
       const buckets: Bucket[] = [];
       querySnapshot.forEach((doc) => {
         const data = doc.data() as SharedBucketDoc;
+        // Repair malformed content written by any member's client
+        const bucket = normalizeBucket({ ...data.bucket, id: doc.id });
+        if (!bucket) return;
         buckets.push({
-          ...data.bucket,
-          id: doc.id,
+          ...bucket,
           isShared: true,
           owners: data.owners,
           createdBy: data.createdBy
@@ -255,7 +308,7 @@ export const sharedBuckets = {
       return { buckets };
     } catch (error) {
       console.error('Error loading shared buckets:', error);
-      return { buckets: [], error: 'Failed to load shared buckets' };
+      return { buckets: [], error: 'Failed to load shared buckets', failure: syncFailureOf(error) };
     }
   },
 
@@ -302,27 +355,43 @@ export const sharedBuckets = {
     }
   },
 
-  // Save/update a shared bucket
-  async save(bucketId: string, bucket: Bucket): Promise<{ success: boolean; error?: string }> {
+  // Save a shared bucket's content. Merges with the server copy inside a
+  // transaction, so collaborators' changes since this device last loaded the
+  // bucket are kept. Membership fields are left as the server has them.
+  // Returns the merged bucket that was written.
+  async save(bucketId: string, bucket: Bucket): Promise<{ success: boolean; bucket?: Bucket; error?: string; failure?: SyncFailure }> {
     try {
       const docRef = doc(db, 'sharedBuckets', bucketId);
-      
-      // Clean bucket data to remove undefined values (Firestore doesn't accept undefined)
-      const cleanBucket = JSON.parse(JSON.stringify({
-        ...bucket,
-        isShared: true
-      }));
-      
-      // Only update the bucket content and lastModified
-      await updateDoc(docRef, {
-        bucket: cleanBucket,
-        lastModified: serverTimestamp()
+
+      const merged = await runTransaction(db, async (transaction) => {
+        const docSnap = await transaction.get(docRef);
+        if (!docSnap.exists()) {
+          throw new Error('Shared bucket not found');
+        }
+        const docData = docSnap.data() as SharedBucketDoc;
+        const serverBucket = normalizeBucket({ ...docData.bucket, id: bucketId }) ?? { id: bucketId, name: bucket.name, categories: [] };
+        const combined = mergeBucket(bucket, serverBucket);
+        const result: Bucket = {
+          ...(pruneTombstones({ buckets: [combined] }).buckets[0] ?? combined),
+          id: bucketId,
+          isShared: true,
+          owners: docData.owners,
+          createdBy: docData.createdBy
+        };
+        // Remove undefined values (Firestore doesn't accept undefined)
+        const cleanBucket = JSON.parse(JSON.stringify(result));
+        assertSyncable(cleanBucket);
+        transaction.update(docRef, {
+          bucket: cleanBucket,
+          lastModified: serverTimestamp()
+        });
+        return result;
       });
-      
-      return { success: true };
+
+      return { success: true, bucket: merged };
     } catch (error) {
       console.error('Error saving shared bucket:', error);
-      return { success: false, error: 'Failed to save shared bucket' };
+      return { success: false, error: 'Failed to save shared bucket', failure: syncFailureOf(error) };
     }
   },
 

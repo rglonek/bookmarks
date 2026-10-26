@@ -1,16 +1,33 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { AppData, Bucket, Category, Bookmark, SharedOwner, SharePermission } from './types';
-import { storage, createBucket, createCategory, createBookmark } from './storage';
-import { extractMetadata, auth, serverData, sharedBuckets, userProfile } from './api';
+import { storage, createBucket, createCategory, createBookmark, generateId } from './storage';
+import { bucketContentKey, mergeBucket, mergeData, mergeSharedBuckets, pruneTombstones, replaceLibrary } from './merge';
+import { extractMetadata, auth, serverData, sharedBuckets, userProfile, syncFailureOf, type SyncFailure } from './api';
 import { User } from 'firebase/auth';
+import { isWebUrl, parseSharedLink } from './url';
+import { formatMegabytes, jsonBytes, MAX_SYNC_BYTES } from './limits';
+import { normalizeLibrary } from './normalize';
 
 type ViewMode = 'card' | 'grid' | 'list';
+
+// Rename/delete/share/edit buttons on list items: shown on mouse hover and on
+// keyboard focus, and always on touch screens, which have no hover.
+const ITEM_ACTIONS = 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100 transition';
+
+// Shown in a banner when syncing fails for a reason other than being offline
+const SYNC_PROBLEM_MESSAGES: Record<Exclude<SyncFailure, 'unreachable'>, string> = {
+  denied: 'The cloud refused your changes (permission denied). They are kept on this device. Signing out and back in usually fixes this.',
+  'too-large': 'Your library is too large to sync (Firestore allows 1 MB per library). Changes are kept on this device. Delete some bookmarks or buckets to sync again.',
+  failed: 'Syncing failed. Your changes are kept on this device. Use Refresh to try again.',
+};
 
 // Helper to open URLs in external browser (especially for PWA on iOS)
 const openExternalLink = (url: string, e?: React.MouseEvent) => {
   if (e) {
     e.preventDefault();
   }
+  // Never open javascript:, data: or other non-web links
+  if (!isWebUrl(url)) return;
   // Use window.open with _system or _blank to force external browser
   // On iOS PWA, this helps open in Safari instead of in-app
   window.open(url, '_blank', 'noopener,noreferrer');
@@ -28,7 +45,6 @@ function App() {
   const [searchBucket, setSearchBucket] = useState<string>('all');
   const [searchCategory, setSearchCategory] = useState<string>('all');
   const [searchTag, setSearchTag] = useState<string>('all');
-  const [isExtracting, setIsExtracting] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [renamingBucket, setRenamingBucket] = useState<string | null>(null);
   const [renamingCategory, setRenamingCategory] = useState<string | null>(null);
@@ -53,6 +69,23 @@ function App() {
   
   // Separate state for shared buckets
   const [sharedBucketsData, setSharedBucketsData] = useState<Bucket[]>([]);
+  // Each shared bucket's content as of the last load from or save to the
+  // server. A bucket whose content differs has unsaved edits on this device.
+  const sharedSnapshotRef = useRef(new Map<string, string>());
+
+  // Take in shared buckets from the server, keeping this device's unsaved
+  // edits on top.
+  const applySharedFromServer = useCallback((uid: string, serverBuckets: Bucket[]) => {
+    const previous = new Map(sharedSnapshotRef.current);
+    sharedSnapshotRef.current = new Map(serverBuckets.map(b => [b.id, bucketContentKey(b)]));
+    setSharedBucketsData(current => mergeSharedBuckets(current, serverBuckets, previous, uid));
+  }, []);
+
+  // Shared buckets with edits not yet saved to the server
+  const hasUnsavedSharedEdits = (uid: string) => sharedBucketsData.some(b =>
+    b.owners?.some(o => o.id === uid && o.permission === 'write') &&
+    bucketContentKey(b) !== sharedSnapshotRef.current.get(b.id)
+  );
   
   // Firebase Authentication state
   const [user, setUser] = useState<User | null>(null);
@@ -60,13 +93,37 @@ function App() {
   const [authError, setAuthError] = useState<string | null>(null);
   
   // Sync state
-  const [serverLastModified, setServerLastModified] = useState<string | null>(null);
+  // Change marker of the server copy this device last saw. A ref, not state:
+  // nothing renders from it, and changing it shouldn't restart the sync loop.
+  const serverLastModifiedRef = useRef<string | null>(null);
+  // uid whose server data has been merged into `data`. Nothing is saved to the
+  // server until this matches the signed-in user, so a fresh sign-in can't
+  // overwrite the cloud library with whatever happened to be in local storage.
+  const [syncedUid, setSyncedUid] = useState<string | null>(null);
   const syncIntervalRef = useRef<number | null>(null);
   const isSyncingRef = useRef(false);
+  // Bumped on every auth change so a slow load for an earlier user is ignored.
+  const authSeqRef = useRef(0);
+  // Whose local cache `data` belongs to: a uid, null for signed-out local
+  // mode, or undefined while switching accounts (nothing is written then).
+  const localOwnerRef = useRef<string | null | undefined>(undefined);
   
   // Network state
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [serverReachable, setServerReachable] = useState(true);
+  // A sync failure that waiting won't fix (see SYNC_PROBLEM_MESSAGES)
+  const [syncProblem, setSyncProblem] = useState<string | null>(null);
+  // Bumped by Refresh to retry the server save even if nothing changed
+  const [saveNonce, setSaveNonce] = useState(0);
+  
+  const noteSyncFailure = useCallback((failure: SyncFailure = 'unreachable') => {
+    if (failure === 'unreachable') {
+      setServerReachable(false);
+      return;
+    }
+    setServerReachable(true);
+    setSyncProblem(SYNC_PROBLEM_MESSAGES[failure]);
+  }, []);
   
   // Sync feedback state
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'success' | 'error'>('idle');
@@ -75,150 +132,64 @@ function App() {
   const autoScrollIntervalRef = useRef<number | null>(null);
   const scrollDirectionRef = useRef<'up' | 'down' | null>(null);
 
-  // Merge function - combines local and server data intelligently
-  // Handles soft deletes: if either side has deleted=true, the merged result is deleted
-  const mergeData = useCallback((localData: AppData, serverDataObj: AppData): AppData => {
-    // Create maps for quick lookup
-    const mergedBuckets = new Map<string, Bucket>();
-    
-    // First, add all local buckets
-    localData.buckets.forEach(bucket => {
-      mergedBuckets.set(bucket.id, { ...bucket });
-    });
-    
-    // Then merge in server buckets
-    serverDataObj.buckets.forEach(serverBucket => {
-      if (mergedBuckets.has(serverBucket.id)) {
-        // Bucket exists in both - merge categories
-        const localBucket = mergedBuckets.get(serverBucket.id)!;
-        
-        // Check if bucket is deleted on either side
-        const bucketDeleted = localBucket.deleted || serverBucket.deleted;
-        const bucketDeletedAt = localBucket.deletedAt || serverBucket.deletedAt;
-        
-        const mergedCategories = new Map<string, Category>();
-        
-        // Add local categories
-        localBucket.categories.forEach(cat => {
-          mergedCategories.set(cat.id, { ...cat });
-        });
-        
-        // Merge server categories
-        serverBucket.categories.forEach(serverCat => {
-          if (mergedCategories.has(serverCat.id)) {
-            // Category exists in both - merge bookmarks
-            const localCat = mergedCategories.get(serverCat.id)!;
-            
-            // Check if category is deleted on either side
-            const catDeleted = localCat.deleted || serverCat.deleted;
-            const catDeletedAt = localCat.deletedAt || serverCat.deletedAt;
-            
-            const mergedBookmarks = new Map<string, Bookmark>();
-            
-            // Add local bookmarks
-            localCat.bookmarks.forEach(bm => {
-              mergedBookmarks.set(bm.id, { ...bm });
-            });
-            
-            // Merge server bookmarks
-            serverCat.bookmarks.forEach(serverBm => {
-              if (mergedBookmarks.has(serverBm.id)) {
-                // Bookmark exists in both
-                const localBm = mergedBookmarks.get(serverBm.id)!;
-                
-                // If either side is deleted, mark as deleted
-                if (localBm.deleted || serverBm.deleted) {
-                  mergedBookmarks.set(serverBm.id, {
-                    ...serverBm,
-                    deleted: true,
-                    deletedAt: localBm.deletedAt || serverBm.deletedAt
-                  });
-                } else {
-                  // Neither deleted - use the one with latest updatedAt
-                  const localTime = new Date(localBm.updatedAt).getTime();
-                  const serverTime = new Date(serverBm.updatedAt).getTime();
-                  
-                  if (serverTime > localTime) {
-                    mergedBookmarks.set(serverBm.id, { ...serverBm });
-                  }
-                  // else keep local (already set)
-                }
-              } else {
-                // Bookmark only on server
-                mergedBookmarks.set(serverBm.id, { ...serverBm });
-              }
-            });
-            
-            mergedCategories.set(serverCat.id, {
-              ...localCat,
-              name: serverCat.name, // Use server name for category
-              bookmarks: Array.from(mergedBookmarks.values()),
-              deleted: catDeleted,
-              deletedAt: catDeletedAt
-            });
-          } else {
-            // Category only on server
-            mergedCategories.set(serverCat.id, { ...serverCat });
-          }
-        });
-        
-        mergedBuckets.set(serverBucket.id, {
-          ...localBucket,
-          name: serverBucket.name, // Use server name for bucket
-          categories: Array.from(mergedCategories.values()),
-          deleted: bucketDeleted,
-          deletedAt: bucketDeletedAt
-        });
-      } else {
-        // Bucket only on server
-        mergedBuckets.set(serverBucket.id, { ...serverBucket });
-      }
-    });
-    
-    return {
-      buckets: Array.from(mergedBuckets.values())
-    };
-  }, []);
   
+  // Fetch server data and merge it into local state. The first pull for a
+  // user always loads, even if the timestamps match, so that a failed initial
+  // load is retried. Returns false if the server could not be reached.
+  const pullFromServer = useCallback(async (uid: string): Promise<boolean> => {
+    const isCurrentUser = () => auth.getCurrentUser()?.uid === uid;
+
+    const result = await serverData.check(uid);
+    if (!isCurrentUser()) return true;
+    if (result.error) {
+      noteSyncFailure(result.failure);
+      return false;
+    }
+
+    if (result.lastModified !== serverLastModifiedRef.current || syncedUid !== uid) {
+      const loadResult = await serverData.load(uid);
+      if (!isCurrentUser()) return true;
+      if (!loadResult.data || loadResult.error) {
+        noteSyncFailure(loadResult.failure);
+        return false;
+      }
+      setData(currentData => {
+        const merged = pruneTombstones(mergeData(currentData, loadResult.data!));
+        // Same content: keep the current object so nothing re-renders or re-saves
+        if (JSON.stringify(merged) === JSON.stringify(currentData)) return currentData;
+        storage.save(merged, uid);
+        return merged;
+      });
+      serverLastModifiedRef.current = loadResult.lastModified || null;
+      setSyncedUid(uid);
+    }
+    setServerReachable(true);
+
+    // Also refresh shared buckets. Don't fail the whole sync if this fails.
+    const sharedResult = await sharedBuckets.loadAll(uid);
+    if (!isCurrentUser()) return true;
+    if (!sharedResult.error) {
+      applySharedFromServer(uid, sharedResult.buckets);
+    } else {
+      console.warn('Failed to load shared buckets:', sharedResult.error);
+    }
+    return true;
+  }, [syncedUid, applySharedFromServer, noteSyncFailure]);
+
   // Sync with server - fetch and merge
   const syncWithServer = useCallback(async () => {
     if (!user || isSyncingRef.current) return;
     
     isSyncingRef.current = true;
     try {
-      const result = await serverData.check(user.uid);
-      
-      if (!result.error && result.lastModified !== serverLastModified) {
-        // Server has changes, fetch and merge
-        const loadResult = await serverData.load(user.uid);
-        
-        if (loadResult.data && !loadResult.error) {
-          setData(currentData => {
-            const merged = mergeData(currentData, loadResult.data!);
-            storage.save(merged);
-            return merged;
-          });
-          setServerLastModified(loadResult.lastModified || null);
-          setServerReachable(true); // Server is reachable
-        }
-      } else if (result.error) {
-        setServerReachable(false); // Server unreachable
-      } else {
-        setServerReachable(true); // Server is reachable
-      }
-      
-      // Also refresh shared buckets
-      const sharedResult = await sharedBuckets.loadAll(user.uid);
-      if (!sharedResult.error) {
-        setSharedBucketsData(sharedResult.buckets);
-      }
+      await pullFromServer(user.uid);
     } catch (error) {
       console.error('Sync error:', error);
-      setServerReachable(false); // Server unreachable
+      noteSyncFailure(syncFailureOf(error));
     } finally {
       isSyncingRef.current = false;
     }
-  }, [user, serverLastModified, mergeData]);
+  }, [user, pullFromServer, noteSyncFailure]);
   
   // Manual refresh with visual feedback
   const handleRefresh = async () => {
@@ -234,41 +205,16 @@ function App() {
     let finalStatus: 'success' | 'error' = 'success';
     
     try {
-      const result = await serverData.check(user.uid);
-      
-      if (!result.error && result.lastModified !== serverLastModified) {
-        // Server has changes, fetch and merge
-        const loadResult = await serverData.load(user.uid);
-        
-        if (loadResult.data && !loadResult.error) {
-          setData(currentData => {
-            const merged = mergeData(currentData, loadResult.data!);
-            storage.save(merged);
-            return merged;
-          });
-          setServerLastModified(loadResult.lastModified || null);
-          setServerReachable(true);
-        }
-      } else if (result.error) {
-        setServerReachable(false);
+      if (!(await pullFromServer(user.uid))) {
         finalStatus = 'error';
-      } else {
-        setServerReachable(true);
-      }
-      
-      // Also refresh shared buckets
-      const sharedResult = await sharedBuckets.loadAll(user.uid);
-      if (!sharedResult.error) {
-        setSharedBucketsData(sharedResult.buckets);
-      } else if (sharedResult.error) {
-        // Don't fail the whole sync if shared buckets fail
-        console.warn('Failed to load shared buckets:', sharedResult.error);
       }
     } catch (error) {
       console.error('Sync error:', error);
-      setServerReachable(false);
+      noteSyncFailure(syncFailureOf(error));
       finalStatus = 'error';
     }
+    // Also retry the save, in case that is what failed
+    setSaveNonce(n => n + 1);
     
     // Ensure minimum display time for syncing animation
     const elapsed = Date.now() - startTime;
@@ -285,45 +231,78 @@ function App() {
   // Firebase Auth state listener
   useEffect(() => {
     const unsubscribe = auth.onAuthStateChanged(async (firebaseUser) => {
+      const seq = ++authSeqRef.current;
+      const isCurrent = () => seq === authSeqRef.current;
+
+      // Block server saves until this user's server data has been merged in,
+      // and local saves until `data` belongs to the new account.
+      localOwnerRef.current = undefined;
+      setSyncedUid(null);
+      setSyncProblem(null);
+      setServerReachable(true);
       setUser(firebaseUser);
       setIsAuthLoading(false);
       
       if (firebaseUser) {
-        // Register user's email for sharing lookup
-        await userProfile.registerEmail(firebaseUser);
+        // Register user's email for sharing lookup. Not awaited: the data
+        // load below shouldn't wait on two extra writes.
+        void userProfile.registerEmail(firebaseUser);
         
-        // User is signed in - load and merge data
-        const localData = storage.load();
-        const serverResult = await serverData.load(firebaseUser.uid);
+        // User is signed in. Start from this account's own cache plus any
+        // signed-out (local mode) data, which this account now adopts. The
+        // signed-out data is cleared so a later account can't pick it up too.
+        // Show this account's cached shared buckets (and any edits made to
+        // them offline) until the server copy arrives.
+        const cachedShared = storage.loadShared(firebaseUser.uid);
+        sharedSnapshotRef.current = new Map(cachedShared.snapshot);
+        setSharedBucketsData(cachedShared.buckets);
+
+        const anonData = storage.load();
+        const localData = mergeData(storage.load(firebaseUser.uid), anonData);
+        if (anonData.buckets.length > 0) {
+          storage.save(localData, firebaseUser.uid);
+          storage.clear();
+        }
+        const [serverResult, sharedResult] = await Promise.all([
+          serverData.load(firebaseUser.uid),
+          sharedBuckets.loadAll(firebaseUser.uid),
+        ]);
+        if (!isCurrent()) return;
         
-        // Also load shared buckets
-        const sharedResult = await sharedBuckets.loadAll(firebaseUser.uid);
+        // Merge the server copy over the cached shared buckets. If it couldn't
+        // be loaded (offline), keep showing the cache.
         if (!sharedResult.error) {
-          setSharedBucketsData(sharedResult.buckets);
+          applySharedFromServer(firebaseUser.uid, sharedResult.buckets);
         }
         
+        let finalData = localData;
         if (serverResult.data && !serverResult.error) {
           // Merge server and local data
-          const merged = mergeData(localData, serverResult.data);
-          setData(merged);
-          setServerLastModified(serverResult.lastModified || null);
-          storage.save(merged); // Save merged data locally
+          finalData = pruneTombstones(mergeData(localData, serverResult.data));
+          serverLastModifiedRef.current = serverResult.lastModified || null;
+          storage.save(finalData, firebaseUser.uid); // Save merged data locally
+          setSyncedUid(firebaseUser.uid);
         } else {
-          // Fallback to local storage
-          setData(localData);
+          // Load failed: show local data but keep server saves blocked. The
+          // next sync (focus, online, refresh) retries the load first.
+          noteSyncFailure(serverResult.failure);
         }
+        localOwnerRef.current = firebaseUser.uid;
+        setData(finalData);
         setIsLoaded(true);
         
         // Select first bucket if none selected (including shared buckets)
-        const finalData = serverResult.data ? mergeData(localData, serverResult.data) : localData;
-        const allBucketsForSelection = [...finalData.buckets.filter(b => !b.deleted), ...sharedResult.buckets.filter(b => !b.deleted)];
+        const sharedForSelection = sharedResult.error ? cachedShared.buckets : sharedResult.buckets;
+        const allBucketsForSelection = [...finalData.buckets.filter(b => !b.deleted), ...sharedForSelection.filter(b => !b.deleted)];
         if (allBucketsForSelection.length > 0) {
           setSelectedBucket(allBucketsForSelection[0].id);
         }
       } else {
         // User is signed out - load from local storage only, clear shared buckets
+        sharedSnapshotRef.current = new Map();
         setSharedBucketsData([]);
         const loadedData = storage.load();
+        localOwnerRef.current = null;
         setData(loadedData);
         setIsLoaded(true);
         
@@ -337,41 +316,60 @@ function App() {
     });
 
     return () => unsubscribe();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [applySharedFromServer, noteSyncFailure]);
 
   // Save data whenever it changes (but only after initial load)
   useEffect(() => {
     if (!isLoaded) return;
     
-    // Always save to localStorage (offline-first) - only personal buckets
-    storage.save(data);
+    // Always save to localStorage (offline-first) - only personal buckets,
+    // under the key of the account the data belongs to
+    if (localOwnerRef.current !== undefined) {
+      storage.save(data, localOwnerRef.current ?? undefined);
+    }
     
-    // Also save to server if authenticated and online
-    if (!user || isSyncingRef.current || !isOnline) return;
+    // Also save to server if authenticated and online, but only once this
+    // user's server data has been loaded and merged into `data`. The save
+    // merges with the server copy, so it is safe while a sync is running.
+    if (!user || syncedUid !== user.uid || !isOnline) return;
     
     // Debounce server saves to avoid too many requests
     const timeoutId = setTimeout(async () => {
-      if (isSyncingRef.current) return; // Check again after timeout
-      
       try {
         const saveResult = await serverData.save(user.uid, data);
-        if (!saveResult.error && saveResult.lastModified) {
-          setServerLastModified(saveResult.lastModified);
+        if (saveResult.success && saveResult.data) {
+          // Take in anything the server had that this device didn't, such as
+          // a bookmark saved from the Chrome extension or another device.
+          const serverCopy = saveResult.data;
+          setData(current => {
+            const next = mergeData(current, serverCopy);
+            return JSON.stringify(next) === JSON.stringify(current) ? current : next;
+          });
+          serverLastModifiedRef.current = saveResult.lastModified ?? null;
           setServerReachable(true); // Server save succeeded
-        } else if (saveResult.error) {
-          console.warn('Server unreachable, data saved locally');
-          setServerReachable(false);
+          setSyncProblem(null);
+        } else {
+          console.warn('Server save failed, data saved locally:', saveResult.error);
+          noteSyncFailure(saveResult.failure);
         }
       } catch (err) {
         console.error('Failed to save to server:', err);
-        setServerReachable(false); // Server unreachable
+        noteSyncFailure(syncFailureOf(err));
         // Data is already saved to localStorage, so no data loss
       }
     }, 500); // Wait 500ms before saving to server
     
     return () => clearTimeout(timeoutId);
-  }, [data, isLoaded, user, isOnline]);
+  }, [data, isLoaded, user, syncedUid, isOnline, saveNonce, noteSyncFailure]);
+
+  // Keep a copy of shared buckets on the device for offline use
+  useEffect(() => {
+    if (!user || localOwnerRef.current !== user.uid) return;
+    storage.saveShared(user.uid, {
+      buckets: sharedBucketsData,
+      snapshot: [...sharedSnapshotRef.current],
+    });
+  }, [sharedBucketsData, user]);
 
   // Save shared buckets whenever they change (only buckets user has write permission on)
   useEffect(() => {
@@ -385,17 +383,32 @@ function App() {
         if (userOwner?.permission !== 'write') {
           continue; // Skip read-only buckets
         }
-        
-        try {
-          await sharedBuckets.save(bucket.id, bucket);
-        } catch (err) {
-          console.error('Failed to save shared bucket:', err);
+        // Only save buckets changed on this device. Writing back a copy that
+        // was just loaded would undo a collaborator's concurrent edit.
+        if (bucketContentKey(bucket) === sharedSnapshotRef.current.get(bucket.id)) {
+          continue;
         }
+        
+        const result = await sharedBuckets.save(bucket.id, bucket);
+        if (!result.success || !result.bucket) {
+          console.error('Failed to save shared bucket:', result.error);
+          noteSyncFailure(result.failure);
+          continue;
+        }
+        const saved = result.bucket;
+        sharedSnapshotRef.current.set(bucket.id, bucketContentKey(saved));
+        // Take in collaborators' changes the save merged in, keeping any edit
+        // made on this device while the save was running.
+        setSharedBucketsData(current => current.map(b => {
+          if (b.id !== bucket.id) return b;
+          const next = { ...mergeBucket(b, saved), isShared: true, owners: b.owners };
+          return bucketContentKey(next) === bucketContentKey(b) ? b : next;
+        }));
       }
     }, 500);
     
     return () => clearTimeout(timeoutId);
-  }, [sharedBucketsData, isLoaded, user, isOnline]);
+  }, [sharedBucketsData, isLoaded, user, isOnline, noteSyncFailure]);
 
   // Cleanup auto-scroll interval on unmount
   useEffect(() => {
@@ -408,33 +421,17 @@ function App() {
 
   // Handle Share Target API - receive shared links from other apps
   useEffect(() => {
-    const urlParams = new URLSearchParams(window.location.search);
-    const sharedUrlParam = urlParams.get('url');
-    const sharedTitle = urlParams.get('title') || '';
-    const sharedText = urlParams.get('text') || '';
-    
-    if (sharedUrlParam) {
-      // Extract URL from text if not provided directly (some apps put URL in text)
-      let url = sharedUrlParam;
-      if (!url && sharedText) {
-        const urlMatch = sharedText.match(/https?:\/\/[^\s]+/);
-        if (urlMatch) {
-          url = urlMatch[0];
-        }
-      }
-      
-      if (url) {
-        setSharedUrl({ 
-          url, 
-          title: sharedTitle, 
-          text: sharedText 
-        });
-        setShowAddSharedBookmarkModal(true);
-        
-        // Clean the URL to remove the share params
-        window.history.replaceState({}, document.title, '/');
-      }
+    const shared = parseSharedLink(window.location.search);
+    if (shared === undefined) return; // not opened by a share
+
+    // Only web links can be saved
+    if (shared) {
+      setSharedUrl(shared);
+      setShowAddSharedBookmarkModal(true);
     }
+
+    // Clean the URL to remove the share params
+    window.history.replaceState({}, document.title, '/');
   }, []);
   
   // Window focus/blur handlers for periodic sync
@@ -738,6 +735,19 @@ function App() {
     setShareSuccess(null);
     
     try {
+      // Find the person before changing anything, so a typo (or someone who
+      // hasn't signed in yet) doesn't leave the bucket converted to shared
+      // with nobody else in it
+      const target = await userProfile.findByEmail(shareEmail.trim());
+      if (!target) {
+        setShareError('User not found. They must sign in at least once before you can share with them.');
+        return;
+      }
+      if (target.userId === user.uid) {
+        setShareError('That is your own account.');
+        return;
+      }
+
       // Check if this bucket is already shared
       const isAlreadyShared = sharingBucket.isShared;
       
@@ -756,10 +766,17 @@ function App() {
           return;
         }
         
-        // Remove from personal buckets and add to shared
+        // Mark the personal copy deleted rather than dropping it, so other
+        // devices' merges don't bring it back as a personal bucket. Its
+        // contents now live in the shared bucket.
+        const convertedAt = new Date().toISOString();
         setData(prev => ({
           ...prev,
-          buckets: prev.buckets.filter(b => b.id !== sharingBucket.id)
+          buckets: prev.buckets.map(b =>
+            b.id === sharingBucket.id
+              ? { ...b, categories: [], deleted: true, deletedAt: convertedAt }
+              : b
+          )
         }));
         
         const newSharedBucket: Bucket = {
@@ -769,6 +786,7 @@ function App() {
           createdBy: user.uid
         };
         
+        sharedSnapshotRef.current.set(newSharedBucket.id, bucketContentKey(newSharedBucket));
         setSharedBucketsData(prev => [...prev, newSharedBucket]);
         setSharingBucket(newSharedBucket);
       }
@@ -908,24 +926,27 @@ function App() {
   };
 
   const renameBucket = (bucketId: string, newName: string) => {
+    // The stamp makes this rename win over an older name when copies merge
+    const updatedAt = new Date().toISOString();
     // Check if this is a shared bucket
     const isSharedBucket = sharedBucketsData.some(b => b.id === bucketId);
     
     if (isSharedBucket) {
       setSharedBucketsData(prev => prev.map(bucket =>
-        bucket.id === bucketId ? { ...bucket, name: newName } : bucket
+        bucket.id === bucketId ? { ...bucket, name: newName, updatedAt } : bucket
       ));
     } else {
       setData(prev => ({
         ...prev,
         buckets: prev.buckets.map(bucket =>
-          bucket.id === bucketId ? { ...bucket, name: newName } : bucket
+          bucket.id === bucketId ? { ...bucket, name: newName, updatedAt } : bucket
         )
       }));
     }
   };
 
   const renameCategory = (bucketId: string, categoryId: string, newName: string) => {
+    const updatedAt = new Date().toISOString();
     // Check if this is a shared bucket
     const isSharedBucket = sharedBucketsData.some(b => b.id === bucketId);
     
@@ -934,7 +955,7 @@ function App() {
         ? {
             ...bucket,
             categories: bucket.categories.map(category =>
-              category.id === categoryId ? { ...category, name: newName } : category
+              category.id === categoryId ? { ...category, name: newName, updatedAt } : category
             )
           }
         : bucket
@@ -949,40 +970,7 @@ function App() {
 
   // Clean up tombstones older than 30 days
   const cleanupOldTombstones = useCallback(() => {
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    
-    setData(prev => ({
-      ...prev,
-      buckets: prev.buckets
-        .filter(bucket => {
-          // Remove buckets deleted more than 30 days ago
-          if (bucket.deleted && bucket.deletedAt) {
-            return new Date(bucket.deletedAt) > thirtyDaysAgo;
-          }
-          return true;
-        })
-        .map(bucket => ({
-          ...bucket,
-          categories: bucket.categories
-            .filter(category => {
-              // Remove categories deleted more than 30 days ago
-              if (category.deleted && category.deletedAt) {
-                return new Date(category.deletedAt) > thirtyDaysAgo;
-              }
-              return true;
-            })
-            .map(category => ({
-              ...category,
-              bookmarks: category.bookmarks.filter(bookmark => {
-                // Remove bookmarks deleted more than 30 days ago
-                if (bookmark.deleted && bookmark.deletedAt) {
-                  return new Date(bookmark.deletedAt) > thirtyDaysAgo;
-                }
-                return true;
-              })
-            }))
-        }))
-    }));
+    setData(prev => pruneTombstones(prev));
   }, []);
   
   // Clean up old tombstones on mount and daily
@@ -1099,6 +1087,8 @@ function App() {
               category.id === categoryId
                 ? {
                     ...category,
+                    // The later reorder wins when copies merge
+                    orderUpdatedAt: new Date().toISOString(),
                     bookmarks: (() => {
                       const bookmarks = [...category.bookmarks];
                       const draggedIndex = bookmarks.findIndex(b => b.id === draggedBookmark.bookmarkId);
@@ -1159,6 +1149,8 @@ function App() {
               category.id === categoryId
                 ? {
                     ...category,
+                    // The later reorder wins when copies merge
+                    orderUpdatedAt: new Date().toISOString(),
                     bookmarks: (() => {
                       const bookmarks = [...category.bookmarks];
                       const draggedIndex = bookmarks.findIndex(b => b.id === draggedBookmark.bookmarkId);
@@ -1213,10 +1205,24 @@ function App() {
   };
 
   const handleSignOut = async () => {
-    if (confirm('Are you sure you want to log out?')) {
-      await auth.signOut();
-      setServerLastModified(null);
+    if (!confirm('Are you sure you want to log out?')) return;
+
+    // Push any last changes, then remove this account's copy from the device.
+    // If that fails, keep the copy so the changes sync on the next sign-in here.
+    if (user) {
+      const saved = syncedUid === user.uid && isOnline
+        ? await serverData.save(user.uid, data)
+        : { success: false };
+      if (saved.success && !hasUnsavedSharedEdits(user.uid)) {
+        storage.clear(user.uid);
+        storage.clearShared(user.uid);
+      } else {
+        alert('Some changes have not reached the cloud yet. They stay on this device and will sync the next time you sign in here.');
+      }
     }
+
+    await auth.signOut();
+    serverLastModifiedRef.current = null;
   };
 
   const exportData = () => {
@@ -1239,10 +1245,19 @@ function App() {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
-        const importedData = JSON.parse(e.target?.result as string);
-        if (importedData.buckets && Array.isArray(importedData.buckets)) {
+        // Repair or drop malformed records rather than letting them crash
+        // the app (and, once synced, every device)
+        const importedData = normalizeLibrary(JSON.parse(e.target?.result as string));
+        if (importedData) {
+          // Keep what the file doesn't contain as deleted records, so the
+          // replacement also reaches the cloud and other devices.
+          const next = replaceLibrary(data, importedData);
+          if (user && jsonBytes(next) > MAX_SYNC_BYTES) {
+            alert(`This file would make your library ${formatMegabytes(jsonBytes(next))}, over the ${formatMegabytes(MAX_SYNC_BYTES)} that can sync. Nothing was imported.`);
+            return;
+          }
           if (confirm('This will replace all existing data. Are you sure?')) {
-            setData(importedData);
+            setData(prev => replaceLibrary(prev, importedData));
             alert('Data imported successfully!');
           }
         } else {
@@ -1372,31 +1387,42 @@ function App() {
         }
 
         // Import into selected bucket
-        setData(prev => ({
-          ...prev,
-          buckets: prev.buckets.map(bucket => {
-            if (bucket.id !== chromeImportBucket) return bucket;
+        const newCategories = parsed.categories.map(cat => {
+          const category = createCategory(cat.name);
+          category.bookmarks = cat.bookmarks.map(bm => 
+            createBookmark({
+              title: bm.title,
+              url: bm.url,
+              description: '',
+              tags: [],
+              notes: ''
+            })
+          );
+          return category;
+        });
+        const addTo = (buckets: Bucket[]) => buckets.map(bucket =>
+          bucket.id === chromeImportBucket
+            ? { ...bucket, categories: [...bucket.categories, ...newCategories] }
+            : bucket
+        );
 
-            const newCategories = parsed.categories.map(cat => {
-              const category = createCategory(cat.name);
-              category.bookmarks = cat.bookmarks.map(bm => 
-                createBookmark({
-                  title: bm.title,
-                  url: bm.url,
-                  description: '',
-                  tags: [],
-                  notes: ''
-                })
-              );
-              return category;
-            });
+        // A signed-in library, and each shared bucket, is one Firestore
+        // document; don't grow it past what can sync (a full browser export
+        // easily can).
+        const intoShared = sharedBucketsData.some(b => b.id === chromeImportBucket);
+        const nextBytes = intoShared
+          ? jsonBytes(addTo(sharedBucketsData).find(b => b.id === chromeImportBucket))
+          : jsonBytes({ buckets: addTo(data.buckets) });
+        if (user && nextBytes > MAX_SYNC_BYTES) {
+          alert(`This import would make ${intoShared ? 'this shared bucket' : 'your library'} ${formatMegabytes(nextBytes)}, over the ${formatMegabytes(MAX_SYNC_BYTES)} that can sync. Nothing was imported. Try exporting a single folder from Chrome.`);
+          return;
+        }
 
-            return {
-              ...bucket,
-              categories: [...bucket.categories, ...newCategories]
-            };
-          })
-        }));
+        if (intoShared) {
+          setSharedBucketsData(addTo);
+        } else {
+          setData(prev => ({ ...prev, buckets: addTo(prev.buckets) }));
+        }
 
         alert(`Successfully imported ${parsed.categories.length} categories with bookmarks!`);
         setShowChromeImportModal(false);
@@ -1423,6 +1449,12 @@ function App() {
     return [...personalBuckets, ...shared]
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [data.buckets, sharedBucketsData]);
+
+  // Buckets the user can add bookmarks to (excludes view-only shared buckets)
+  const writableBuckets = useMemo(
+    () => sortedBuckets.filter(userHasWritePermission),
+    [sortedBuckets, userHasWritePermission]
+  );
 
   const currentBucket = sortedBuckets.find(b => b.id === selectedBucket);
   
@@ -1457,6 +1489,11 @@ function App() {
       {!isOnline && (
         <div className="bg-yellow-500 text-white px-4 py-2 text-center text-sm font-medium">
           No Internet Connection - Changes saved locally only
+        </div>
+      )}
+      {isOnline && syncProblem && user && (
+        <div className="bg-red-600 text-white px-4 py-2 text-center text-sm font-medium" role="alert">
+          {syncProblem}
         </div>
       )}
       {isOnline && !serverReachable && user && (
@@ -1510,7 +1547,7 @@ function App() {
                         : 'bg-teal-600 text-white hover:bg-teal-700'
                     }`}
                     title="Sync with server"
-                    disabled={!isOnline || !serverReachable || syncStatus === 'syncing'}
+                    disabled={!isOnline || syncStatus === 'syncing'}
                   >
                     {syncStatus === 'syncing' ? (
                       <>
@@ -1539,7 +1576,7 @@ function App() {
                         <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                         </svg>
-                        {(!isOnline || !serverReachable) ? 'Offline' : 'Refresh'}
+                        {!isOnline ? 'Offline' : 'Refresh'}
                       </>
                     )}
                   </button>
@@ -1552,8 +1589,8 @@ function App() {
                       <img src={user.photoURL} alt="" className="w-5 h-5 rounded-full" />
                     )}
                     <span className="truncate max-w-[100px]">{user.displayName || user.email}</span>
-                    {isOnline && serverReachable && <span className="text-green-300">●</span>}
-                    {(!isOnline || !serverReachable) && <span className="text-red-300">●</span>}
+                    {isOnline && serverReachable && !syncProblem && <span className="text-green-300">●</span>}
+                    {(!isOnline || !serverReachable || syncProblem) && <span className="text-red-300">●</span>}
                   </button>
                 </>
               ) : (
@@ -1642,6 +1679,8 @@ function App() {
                   onClick={() => setViewMode('list')}
                   className={`px-3 py-1 rounded text-sm ${viewMode === 'list' ? 'bg-indigo-600 text-white' : 'hover:bg-gray-200'}`}
                   title="List view"
+                  aria-label="List view"
+                  aria-pressed={viewMode === 'list'}
                 >
                   ☰
                 </button>
@@ -1649,6 +1688,8 @@ function App() {
                   onClick={() => setViewMode('grid')}
                   className={`px-3 py-1 rounded text-sm ${viewMode === 'grid' ? 'bg-indigo-600 text-white' : 'hover:bg-gray-200'}`}
                   title="Grid view"
+                  aria-label="Grid view"
+                  aria-pressed={viewMode === 'grid'}
                 >
                   ⊞
                 </button>
@@ -1656,6 +1697,8 @@ function App() {
                   onClick={() => setViewMode('card')}
                   className={`px-3 py-1 rounded text-sm ${viewMode === 'card' ? 'bg-indigo-600 text-white' : 'hover:bg-gray-200'}`}
                   title="Card view"
+                  aria-label="Card view"
+                  aria-pressed={viewMode === 'card'}
                 >
                   ▦
                 </button>
@@ -1755,7 +1798,7 @@ function App() {
                             )}
                           </div>
                         )}
-                        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition">
+                        <div className={`flex gap-1 ${ITEM_ACTIONS}`}>
                           {/* Share button - only show for users with write permission */}
                           {user && userHasWritePermission(bucket) && (
                             <button
@@ -1765,6 +1808,7 @@ function App() {
                               }}
                               className="text-purple-500 hover:text-purple-700 text-sm"
                               title="Share"
+                              aria-label={`Share ${bucket.name}`}
                             >
                               🔗
                             </button>
@@ -1778,6 +1822,7 @@ function App() {
                               }}
                               className="text-gray-400 hover:text-gray-600 text-sm"
                               title="View sharing info"
+                              aria-label={`Sharing info for ${bucket.name}`}
                             >
                               👁️
                             </button>
@@ -1791,6 +1836,7 @@ function App() {
                               }}
                               className="text-blue-500 hover:text-blue-700 text-sm"
                               title="Rename"
+                              aria-label={`Rename ${bucket.name}`}
                             >
                               ✏️
                             </button>
@@ -1804,6 +1850,7 @@ function App() {
                               }}
                               className="text-red-500 hover:text-red-700"
                               title={bucket.isShared ? "Leave bucket" : "Delete"}
+                              aria-label={`${bucket.isShared ? 'Leave' : 'Delete'} ${bucket.name}`}
                             >
                               {bucket.isShared ? '🚪' : '×'}
                             </button>
@@ -1883,7 +1930,7 @@ function App() {
                               </>
                             )}
                             {userHasWritePermission(currentBucket) && (
-                              <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition">
+                              <div className={`flex gap-1 ${ITEM_ACTIONS}`}>
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation();
@@ -1891,6 +1938,7 @@ function App() {
                                   }}
                                   className={`text-sm ${selectedCategory === category.id ? 'text-white hover:text-blue-200' : 'text-blue-500 hover:text-blue-700'}`}
                                   title="Rename"
+                                  aria-label={`Rename ${category.name}`}
                                 >
                                   ✏️
                                 </button>
@@ -1903,6 +1951,7 @@ function App() {
                                     selectedCategory === category.id ? 'text-white' : 'text-red-500'
                                   }`}
                                   title="Delete"
+                                  aria-label={`Delete ${category.name}`}
                                 >
                                   ×
                                 </button>
@@ -1925,6 +1974,8 @@ function App() {
                               onClick={() => setViewMode('list')}
                               className={`px-3 py-1 rounded text-sm ${viewMode === 'list' ? 'bg-indigo-600 text-white' : 'hover:bg-gray-200'}`}
                               title="List view"
+                              aria-label="List view"
+                              aria-pressed={viewMode === 'list'}
                             >
                               ☰
                             </button>
@@ -1932,6 +1983,8 @@ function App() {
                               onClick={() => setViewMode('grid')}
                               className={`px-3 py-1 rounded text-sm ${viewMode === 'grid' ? 'bg-indigo-600 text-white' : 'hover:bg-gray-200'}`}
                               title="Grid view"
+                              aria-label="Grid view"
+                              aria-pressed={viewMode === 'grid'}
                             >
                               ⊞
                             </button>
@@ -1939,6 +1992,8 @@ function App() {
                               onClick={() => setViewMode('card')}
                               className={`px-3 py-1 rounded text-sm ${viewMode === 'card' ? 'bg-indigo-600 text-white' : 'hover:bg-gray-200'}`}
                               title="Card view"
+                              aria-label="Card view"
+                              aria-pressed={viewMode === 'card'}
                             >
                               ▦
                             </button>
@@ -2032,7 +2087,7 @@ function App() {
 
       {/* Modals */}
       {showBucketModal && (
-        <Modal onClose={() => setShowBucketModal(false)}>
+        <Modal onClose={() => setShowBucketModal(false)} label="Create new bucket">
           <h2 className="text-xl font-semibold mb-4">Create New Bucket</h2>
           <form
             onSubmit={(e) => {
@@ -2072,7 +2127,7 @@ function App() {
       )}
 
       {showCategoryModal && currentBucket && (
-        <Modal onClose={() => setShowCategoryModal(false)}>
+        <Modal onClose={() => setShowCategoryModal(false)} label="Create new category">
           <h2 className="text-xl font-semibold mb-4">Create New Category</h2>
           <form
             onSubmit={(e) => {
@@ -2116,18 +2171,14 @@ function App() {
           bookmark={editingBookmark}
           currentBucketId={currentBucket.id}
           currentCategoryId={currentCategory.id}
-          allBuckets={sortedBuckets}
-          isExtracting={isExtracting}
+          allBuckets={writableBuckets}
           isAuthenticated={!!user}
           onExtract={async (url) => {
             if (!user) {
               // If not authenticated, return empty (metadata extraction requires auth)
               return { title: '', description: '' };
             }
-            setIsExtracting(true);
-            const metadata = await extractMetadata(url);
-            setIsExtracting(false);
-            return metadata;
+            return extractMetadata(url);
           }}
           onSave={(bookmarkData, targetBucketId, targetCategoryId) => {
             const isCurrentShared = sharedBucketsData.some(b => b.id === currentBucket.id);
@@ -2135,14 +2186,24 @@ function App() {
             
             // If bookmark is being moved to a different location
             if (editingBookmark && (targetBucketId !== currentBucket.id || targetCategoryId !== currentCategory.id)) {
-              // Delete from old location
+              // Mark the old copy deleted (dropping it would let other devices'
+              // merges restore it) and add the bookmark at the new location
+              // under a new id.
+              const movedAt = new Date().toISOString();
               const removeFromBuckets = (buckets: Bucket[]) => buckets.map(bucket =>
                 bucket.id === currentBucket.id
                   ? {
                       ...bucket,
                       categories: bucket.categories.map(category =>
                         category.id === currentCategory.id
-                          ? { ...category, bookmarks: category.bookmarks.filter(b => b.id !== editingBookmark.id) }
+                          ? {
+                              ...category,
+                              bookmarks: category.bookmarks.map(b =>
+                                b.id === editingBookmark.id
+                                  ? { ...b, deleted: true, deletedAt: movedAt, updatedAt: movedAt }
+                                  : b
+                              )
+                            }
                           : category
                       )
                     }
@@ -2158,9 +2219,9 @@ function App() {
               // Add to new location with updated data
               const updatedBookmark = {
                 ...bookmarkData,
-                id: editingBookmark.id,
+                id: generateId(),
                 createdAt: editingBookmark.createdAt,
-                updatedAt: new Date().toISOString()
+                updatedAt: movedAt
               };
               
               const addToBuckets = (buckets: Bucket[]) => buckets.map(bucket =>
@@ -2197,7 +2258,7 @@ function App() {
       )}
 
       {showChromeImportModal && (
-        <Modal onClose={() => setShowChromeImportModal(false)}>
+        <Modal onClose={() => setShowChromeImportModal(false)} label="Import Chrome bookmarks">
           <h2 className="text-xl font-semibold mb-4">Import Chrome Bookmarks</h2>
           <div className="space-y-4">
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm">
@@ -2220,11 +2281,13 @@ function App() {
                 required
               >
                 <option value="">-- Choose a bucket --</option>
-                {sortedBuckets.map(bucket => (
-                  <option key={bucket.id} value={bucket.id}>{bucket.name}</option>
+                {writableBuckets.map(bucket => (
+                  <option key={bucket.id} value={bucket.id}>
+                    {bucket.name}{bucket.isShared ? ' 👥' : ''}
+                  </option>
                 ))}
               </select>
-              {sortedBuckets.length === 0 && (
+              {writableBuckets.length === 0 && (
                 <p className="text-sm text-red-600 mt-1">Please create a bucket first</p>
               )}
             </div>
@@ -2259,7 +2322,7 @@ function App() {
 
       {/* Share Bucket Modal */}
       {showShareModal && sharingBucket && (
-        <Modal onClose={() => setShowShareModal(false)}>
+        <Modal onClose={() => setShowShareModal(false)} label="Share bucket">
           <h2 className="text-xl font-semibold mb-4">
             {userHasWritePermission(sharingBucket) ? 'Share' : 'Sharing Info'} "{sharingBucket.name}"
           </h2>
@@ -2317,6 +2380,7 @@ function App() {
                             onClick={() => handleRemoveUser(owner.id, owner.email)}
                             className="text-red-500 hover:text-red-700 text-sm ml-1"
                             title="Remove access"
+                            aria-label={`Remove ${owner.email}`}
                           >
                             ×
                           </button>
@@ -2407,29 +2471,46 @@ function App() {
       {showAddSharedBookmarkModal && sharedUrl && (
         <AddSharedBookmarkModal
           sharedUrl={sharedUrl}
-          buckets={sortedBuckets}
+          buckets={writableBuckets}
           isAuthenticated={!!user}
-          onSave={(bucketId, categoryId, bookmarkData) => {
-            const isSharedBucket = sharedBucketsData.some(b => b.id === bucketId);
+          onSignIn={handleGoogleSignIn}
+          onSave={(destination, bookmarkData) => {
             const newBookmark = createBookmark(bookmarkData);
             
-            const updateBuckets = (buckets: Bucket[]) => buckets.map(bucket =>
-              bucket.id === bucketId
-                ? {
-                    ...bucket,
-                    categories: bucket.categories.map(category =>
-                      category.id === categoryId
-                        ? { ...category, bookmarks: [...category.bookmarks, newBookmark] }
-                        : category
-                    )
-                  }
-                : bucket
-            );
-            
-            if (isSharedBucket) {
-              setSharedBucketsData(updateBuckets);
+            if (!destination.bucketId) {
+              // No buckets yet: create one to hold the link
+              const category = { ...createCategory(destination.newCategoryName), bookmarks: [newBookmark] };
+              const bucket = { ...createBucket(destination.newBucketName), categories: [category] };
+              setData(prev => ({ ...prev, buckets: [...prev.buckets, bucket] }));
+              setSelectedBucket(bucket.id);
             } else {
-              setData(prev => ({ ...prev, buckets: updateBuckets(prev.buckets) }));
+              const bucketId = destination.bucketId;
+              const isSharedBucket = sharedBucketsData.some(b => b.id === bucketId);
+              // The bucket has no categories: create one to hold the link
+              const newCategory = destination.categoryId
+                ? null
+                : { ...createCategory(destination.newCategoryName), bookmarks: [newBookmark] };
+              
+              const updateBuckets = (buckets: Bucket[]) => buckets.map(bucket =>
+                bucket.id === bucketId
+                  ? {
+                      ...bucket,
+                      categories: newCategory
+                        ? [...bucket.categories, newCategory]
+                        : bucket.categories.map(category =>
+                            category.id === destination.categoryId
+                              ? { ...category, bookmarks: [...category.bookmarks, newBookmark] }
+                              : category
+                          )
+                    }
+                  : bucket
+              );
+              
+              if (isSharedBucket) {
+                setSharedBucketsData(updateBuckets);
+              } else {
+                setData(prev => ({ ...prev, buckets: updateBuckets(prev.buckets) }));
+              }
             }
             
             setShowAddSharedBookmarkModal(false);
@@ -2445,11 +2526,44 @@ function App() {
   );
 }
 
-// Modal Component
-function Modal({ children, onClose: _onClose }: { children: React.ReactNode; onClose: () => void }) {
+// Modal Component: closes on Escape and on a click on the backdrop
+function Modal({
+  children,
+  onClose,
+  label,
+  widthClass = 'max-w-md'
+}: {
+  children: React.ReactNode;
+  onClose: () => void;
+  label: string;
+  widthClass?: string;
+}) {
+  // Latest onClose, without re-adding the key listener on every render
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  });
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onCloseRef.current();
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, []);
+
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-      <div className="bg-white rounded-lg p-6 max-w-md w-full" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={label}
+        className={`bg-white rounded-lg p-6 ${widthClass} w-full max-h-[90vh] overflow-y-auto`}
+      >
         {children}
       </div>
     </div>
@@ -2514,7 +2628,7 @@ function BookmarkCard({
               )}
             </div>
             <a
-              href={bookmark.url}
+              href={isWebUrl(bookmark.url) ? bookmark.url : undefined}
               target="_blank"
               rel="noopener noreferrer"
               onClick={(e) => openExternalLink(bookmark.url, e)}
@@ -2530,9 +2644,9 @@ function BookmarkCard({
           )}
         </div>
         {canEdit && (
-          <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition">
-            <button onClick={onEdit} className="text-blue-500 hover:text-blue-700 px-2">✏️</button>
-            <button onClick={onDelete} className="text-red-500 hover:text-red-700 px-2">🗑️</button>
+          <div className={`flex gap-1 ${ITEM_ACTIONS}`}>
+            <button onClick={onEdit} className="text-blue-500 hover:text-blue-700 px-2" title="Edit" aria-label={`Edit ${bookmark.title}`}>✏️</button>
+            <button onClick={onDelete} className="text-red-500 hover:text-red-700 px-2" title="Delete" aria-label={`Delete ${bookmark.title}`}>🗑️</button>
           </div>
         )}
       </div>
@@ -2554,14 +2668,14 @@ function BookmarkCard({
         <div className="flex justify-between items-start mb-2">
           <h3 className="font-semibold text-sm truncate flex-1 pr-2">{bookmark.title}</h3>
           {canEdit && (
-            <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition">
-              <button onClick={onEdit} className="text-blue-500 hover:text-blue-700 text-xs">✏️</button>
-              <button onClick={onDelete} className="text-red-500 hover:text-red-700 text-xs">🗑️</button>
+            <div className={`flex gap-1 ${ITEM_ACTIONS}`}>
+              <button onClick={onEdit} className="text-blue-500 hover:text-blue-700 text-xs" title="Edit" aria-label={`Edit ${bookmark.title}`}>✏️</button>
+              <button onClick={onDelete} className="text-red-500 hover:text-red-700 text-xs" title="Delete" aria-label={`Delete ${bookmark.title}`}>🗑️</button>
             </div>
           )}
         </div>
         <a
-          href={bookmark.url}
+          href={isWebUrl(bookmark.url) ? bookmark.url : undefined}
           target="_blank"
           rel="noopener noreferrer"
           onClick={(e) => openExternalLink(bookmark.url, e)}
@@ -2597,9 +2711,9 @@ function BookmarkCard({
       <div className="flex justify-between items-start mb-2">
         <h3 className="font-semibold text-lg truncate flex-1">{bookmark.title}</h3>
         {canEdit && (
-          <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition">
-            <button onClick={onEdit} className="text-blue-500 hover:text-blue-700 px-2">✏️</button>
-            <button onClick={onDelete} className="text-red-500 hover:text-red-700 px-2">🗑️</button>
+          <div className={`flex gap-1 ${ITEM_ACTIONS}`}>
+            <button onClick={onEdit} className="text-blue-500 hover:text-blue-700 px-2" title="Edit" aria-label={`Edit ${bookmark.title}`}>✏️</button>
+            <button onClick={onDelete} className="text-red-500 hover:text-red-700 px-2" title="Delete" aria-label={`Delete ${bookmark.title}`}>🗑️</button>
           </div>
         )}
       </div>
@@ -2609,7 +2723,7 @@ function BookmarkCard({
         </p>
       )}
       <a
-        href={bookmark.url}
+        href={isWebUrl(bookmark.url) ? bookmark.url : undefined}
         target="_blank"
         rel="noopener noreferrer"
         onClick={(e) => openExternalLink(bookmark.url, e)}
@@ -2639,13 +2753,15 @@ function BookmarkCard({
   );
 }
 
+// How long the URL field must sit still before its metadata is looked up
+const EXTRACT_DELAY_MS = 600;
+
 // Bookmark Modal Component
 function BookmarkModal({
   bookmark,
   currentBucketId,
   currentCategoryId,
   allBuckets,
-  isExtracting,
   isAuthenticated,
   onExtract,
   onSave,
@@ -2655,7 +2771,6 @@ function BookmarkModal({
   currentBucketId: string;
   currentCategoryId: string;
   allBuckets: Bucket[];
-  isExtracting: boolean;
   isAuthenticated: boolean;
   onExtract: (url: string) => Promise<{ title: string; description: string }>;
   onSave: (data: Omit<Bookmark, 'id' | 'createdAt' | 'updatedAt'>, bucketId: string, categoryId: string) => void;
@@ -2670,16 +2785,42 @@ function BookmarkModal({
     bucketId: currentBucketId,
     categoryId: currentCategoryId
   });
+  const [urlError, setUrlError] = useState<string | null>(null);
   
   // Get categories for selected bucket
   const selectedBucket = allBuckets.find(b => b.id === formData.bucketId);
-  const availableCategories = selectedBucket ? [...selectedBucket.categories].sort((a, b) => a.name.localeCompare(b.name)) : [];
+  // Categories that can take a bookmark: not deleted, A-Z
+  const liveCategories = (bucket?: Bucket) => bucket
+    ? bucket.categories.filter(c => !c.deleted).sort((a, b) => a.name.localeCompare(b.name))
+    : [];
+  const availableCategories = liveCategories(selectedBucket);
 
-  const handleUrlChange = async (url: string) => {
+  // Metadata lookup runs once typing pauses, and only the latest URL's
+  // result is used: each keystroke used to call the cloud function, and an
+  // earlier, slower answer could fill in the title of a different page.
+  const [isExtracting, setIsExtracting] = useState(false);
+  const extractTimerRef = useRef<number | undefined>(undefined);
+  const extractRequestRef = useRef(0);
+
+  useEffect(() => () => {
+    window.clearTimeout(extractTimerRef.current);
+    extractRequestRef.current += 1; // ignore answers after the dialog closes
+  }, []);
+
+  const handleUrlChange = (url: string) => {
     setFormData(prev => ({ ...prev, url }));
+    setUrlError(null);
 
-    if (url.trim() && url.startsWith('http') && isAuthenticated) {
-      const metadata = await onExtract(url);
+    window.clearTimeout(extractTimerRef.current);
+    const request = ++extractRequestRef.current;
+    setIsExtracting(false);
+    if (!isAuthenticated || !isWebUrl(url)) return;
+
+    extractTimerRef.current = window.setTimeout(async () => {
+      setIsExtracting(true);
+      const metadata = await onExtract(url.trim());
+      if (request !== extractRequestRef.current) return; // URL changed since
+      setIsExtracting(false);
       if (metadata.title || metadata.description) {
         setFormData(prev => ({
           ...prev,
@@ -2687,11 +2828,15 @@ function BookmarkModal({
           description: prev.description || metadata.description
         }));
       }
-    }
+    }, EXTRACT_DELAY_MS);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isWebUrl(formData.url)) {
+      setUrlError('Enter a web address starting with http:// or https://');
+      return;
+    }
     if (formData.title.trim() && formData.url.trim() && formData.bucketId && formData.categoryId) {
       onSave({
         title: formData.title.trim(),
@@ -2704,8 +2849,7 @@ function BookmarkModal({
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-      <div className="bg-white rounded-lg p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+    <Modal onClose={onClose} label={bookmark ? 'Edit bookmark' : 'Create new bookmark'} widthClass="max-w-2xl">
         <h2 className="text-xl font-semibold mb-4">
           {bookmark ? 'Edit Bookmark' : 'Create New Bookmark'}
         </h2>
@@ -2724,6 +2868,9 @@ function BookmarkModal({
               {isExtracting && (
                 <p className="text-sm text-indigo-600 mt-1">Extracting metadata...</p>
               )}
+              {urlError && (
+                <p className="text-sm text-red-600 mt-1">{urlError}</p>
+              )}
               {!isAuthenticated && (
                 <p className="text-sm text-gray-500 mt-1">Sign in to auto-fill title and description</p>
               )}
@@ -2737,7 +2884,7 @@ function BookmarkModal({
                   onChange={(e) => {
                     const newBucketId = e.target.value;
                     const newBucket = allBuckets.find(b => b.id === newBucketId);
-                    const firstCategory = newBucket?.categories[0];
+                    const firstCategory = liveCategories(newBucket)[0];
                     setFormData(prev => ({
                       ...prev,
                       bucketId: newBucketId,
@@ -2834,9 +2981,17 @@ function BookmarkModal({
             </button>
           </div>
         </form>
-      </div>
-    </div>
+    </Modal>
   );
+}
+
+// Where a shared link is saved: an existing bucket and category, or new ones
+// (created when the bucket has no categories, or there are no buckets yet)
+interface SharedLinkDestination {
+  bucketId?: string;
+  categoryId?: string;
+  newBucketName: string;
+  newCategoryName: string;
 }
 
 // Add Shared Bookmark Modal - for receiving URLs from browser share
@@ -2844,46 +2999,44 @@ function AddSharedBookmarkModal({
   sharedUrl,
   buckets,
   isAuthenticated,
+  onSignIn,
   onSave,
   onClose
 }: {
   sharedUrl: { url: string; title: string; text: string };
   buckets: Bucket[];
   isAuthenticated: boolean;
-  onSave: (bucketId: string, categoryId: string, data: Omit<Bookmark, 'id' | 'createdAt' | 'updatedAt'>) => void;
+  onSignIn: () => void;
+  onSave: (destination: SharedLinkDestination, data: Omit<Bookmark, 'id' | 'createdAt' | 'updatedAt'>) => void;
   onClose: () => void;
 }) {
   const [selectedBucket, setSelectedBucket] = useState<string>('');
   const [selectedCategory, setSelectedCategory] = useState<string>('');
+  const [newBucketName, setNewBucketName] = useState('Inbox');
+  const [newCategoryName, setNewCategoryName] = useState('Unsorted');
   const [title, setTitle] = useState(sharedUrl.title || '');
   const [description, setDescription] = useState(sharedUrl.text || '');
   const [tags, setTags] = useState('');
   const [notes, setNotes] = useState('');
 
-  // Get categories for selected bucket
-  const selectedBucketData = buckets.find(b => b.id === selectedBucket);
-  const categories = selectedBucketData 
-    ? [...selectedBucketData.categories].filter(c => !c.deleted).sort((a, b) => a.name.localeCompare(b.name))
+  // The choice falls back to the first bucket and category, so it stays valid
+  // while buckets load (for example right after signing in)
+  const bucket = buckets.find(b => b.id === selectedBucket) ?? buckets[0];
+  const categories = bucket
+    ? bucket.categories.filter(c => !c.deleted).sort((a, b) => a.name.localeCompare(b.name))
     : [];
-
-  // Auto-select first bucket and category
-  useEffect(() => {
-    if (buckets.length > 0 && !selectedBucket) {
-      setSelectedBucket(buckets[0].id);
-    }
-  }, [buckets, selectedBucket]);
-
-  useEffect(() => {
-    if (categories.length > 0 && !selectedCategory) {
-      setSelectedCategory(categories[0].id);
-    }
-  }, [categories, selectedCategory]);
+  const category = categories.find(c => c.id === selectedCategory) ?? categories[0];
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedBucket || !selectedCategory || !title.trim()) return;
+    if (!title.trim()) return;
 
-    onSave(selectedBucket, selectedCategory, {
+    onSave({
+      bucketId: bucket?.id,
+      categoryId: category?.id,
+      newBucketName: newBucketName.trim() || 'Inbox',
+      newCategoryName: newCategoryName.trim() || 'Unsorted',
+    }, {
       title: title.trim(),
       url: sharedUrl.url,
       description: description.trim(),
@@ -2892,100 +3045,82 @@ function AddSharedBookmarkModal({
     });
   };
 
-  if (!isAuthenticated) {
-    return (
-      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-        <div className="bg-white rounded-lg p-6 max-w-md w-full">
-          <h2 className="text-xl font-semibold mb-4">Save Bookmark</h2>
-          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 text-yellow-800 mb-4">
-            <p className="font-medium">Sign in required</p>
-            <p className="text-sm mt-1">Please sign in to save bookmarks.</p>
-          </div>
-          <div className="bg-gray-50 rounded-lg p-3 mb-4">
-            <p className="text-sm text-gray-600 break-all">{sharedUrl.url}</p>
-          </div>
-          <button
-            onClick={onClose}
-            className="w-full bg-gray-200 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-300 transition"
-          >
-            Close
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  if (buckets.length === 0) {
-    return (
-      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-        <div className="bg-white rounded-lg p-6 max-w-md w-full">
-          <h2 className="text-xl font-semibold mb-4">Save Bookmark</h2>
-          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 text-yellow-800 mb-4">
-            <p className="font-medium">No buckets available</p>
-            <p className="text-sm mt-1">Please create a bucket first to save bookmarks.</p>
-          </div>
-          <div className="bg-gray-50 rounded-lg p-3 mb-4">
-            <p className="text-sm text-gray-600 break-all">{sharedUrl.url}</p>
-          </div>
-          <button
-            onClick={onClose}
-            className="w-full bg-gray-200 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-300 transition"
-          >
-            Close
-          </button>
-        </div>
-      </div>
-    );
-  }
+  const fieldClass = "w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500";
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-      <div className="bg-white rounded-lg p-6 max-w-lg w-full max-h-[90vh] overflow-y-auto">
+    <Modal onClose={onClose} label="Save shared link" widthClass="max-w-lg">
         <h2 className="text-xl font-semibold mb-4">Save Shared Link</h2>
         
         <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3 mb-4">
           <p className="text-sm text-indigo-800 break-all">{sharedUrl.url}</p>
         </div>
 
+        {!isAuthenticated && (
+          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-4 text-sm text-yellow-800 flex items-center justify-between gap-3">
+            <span>Not signed in: this saves on this device only.</span>
+            <button
+              type="button"
+              onClick={onSignIn}
+              className="flex-shrink-0 bg-white border border-yellow-300 text-yellow-900 px-3 py-1 rounded-lg hover:bg-yellow-100 transition"
+            >
+              Sign in
+            </button>
+          </div>
+        )}
+
         <form onSubmit={handleSubmit}>
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="block text-sm font-medium mb-1">Bucket *</label>
-                <select
-                  value={selectedBucket}
-                  onChange={(e) => {
-                    setSelectedBucket(e.target.value);
-                    setSelectedCategory('');
-                  }}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  required
-                >
-                  <option value="">Select bucket</option>
-                  {buckets.map(bucket => (
-                    <option key={bucket.id} value={bucket.id}>
-                      {bucket.name}{bucket.isShared ? ' 👥' : ''}
-                    </option>
-                  ))}
-                </select>
+                {bucket ? (
+                  <select
+                    value={bucket.id}
+                    onChange={(e) => {
+                      setSelectedBucket(e.target.value);
+                      setSelectedCategory('');
+                    }}
+                    className={fieldClass}
+                    required
+                  >
+                    {buckets.map(b => (
+                      <option key={b.id} value={b.id}>
+                        {b.name}{b.isShared ? ' 👥' : ''}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    value={newBucketName}
+                    onChange={(e) => setNewBucketName(e.target.value)}
+                    aria-label="New bucket name"
+                    className={fieldClass}
+                  />
+                )}
               </div>
 
               <div>
                 <label className="block text-sm font-medium mb-1">Category *</label>
-                <select
-                  value={selectedCategory}
-                  onChange={(e) => setSelectedCategory(e.target.value)}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  required
-                  disabled={!selectedBucket}
-                >
-                  <option value="">Select category</option>
-                  {categories.map(category => (
-                    <option key={category.id} value={category.id}>{category.name}</option>
-                  ))}
-                </select>
-                {selectedBucket && categories.length === 0 && (
-                  <p className="text-xs text-red-600 mt-1">No categories in this bucket</p>
+                {category ? (
+                  <select
+                    value={category.id}
+                    onChange={(e) => setSelectedCategory(e.target.value)}
+                    className={fieldClass}
+                    required
+                  >
+                    {categories.map(c => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    value={newCategoryName}
+                    onChange={(e) => setNewCategoryName(e.target.value)}
+                    aria-label="New category name"
+                    className={fieldClass}
+                  />
                 )}
               </div>
             </div>
@@ -2997,7 +3132,7 @@ function AddSharedBookmarkModal({
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder="Bookmark title"
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className={fieldClass}
                 required
               />
             </div>
@@ -3009,7 +3144,7 @@ function AddSharedBookmarkModal({
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder="Brief description"
                 rows={2}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className={fieldClass}
               />
             </div>
 
@@ -3020,7 +3155,7 @@ function AddSharedBookmarkModal({
                 value={tags}
                 onChange={(e) => setTags(e.target.value)}
                 placeholder="react, tutorial, javascript"
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className={fieldClass}
               />
             </div>
 
@@ -3031,7 +3166,7 @@ function AddSharedBookmarkModal({
                 onChange={(e) => setNotes(e.target.value)}
                 placeholder="Additional notes"
                 rows={2}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className={fieldClass}
               />
             </div>
           </div>
@@ -3039,7 +3174,7 @@ function AddSharedBookmarkModal({
           <div className="flex gap-2 mt-6">
             <button
               type="submit"
-              disabled={!selectedBucket || !selectedCategory || !title.trim()}
+              disabled={!title.trim()}
               className="flex-1 bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
             >
               Save Bookmark
@@ -3053,8 +3188,7 @@ function AddSharedBookmarkModal({
             </button>
           </div>
         </form>
-      </div>
-    </div>
+    </Modal>
   );
 }
 

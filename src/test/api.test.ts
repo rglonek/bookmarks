@@ -72,34 +72,6 @@ describe('Firebase API Module', () => {
       expect(typeof extractMetadata).toBe('function');
     });
   });
-
-  describe('Auth Methods', () => {
-    it('should have legacy methods for backwards compatibility', async () => {
-      const { auth } = await import('../api');
-      
-      // These legacy methods exist but redirect to Google Sign-In
-      expect(typeof auth.register).toBe('function');
-      expect(typeof auth.login).toBe('function');
-      expect(typeof auth.logout).toBe('function');
-      expect(typeof auth.checkSession).toBe('function');
-    });
-
-    it('legacy register should return error directing to Google Sign-In', async () => {
-      const { auth } = await import('../api');
-      
-      const result = await auth.register('test', 'test');
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('Google Sign-In');
-    });
-
-    it('legacy login should return error directing to Google Sign-In', async () => {
-      const { auth } = await import('../api');
-      
-      const result = await auth.login('test', 'test');
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('Google Sign-In');
-    });
-  });
 });
 
 describe('MetadataResponse Type', () => {

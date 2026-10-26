@@ -1,15 +1,17 @@
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
-import fetch from 'node-fetch';
 import * as cheerio from 'cheerio';
+import { fetchPageStart, RefusedUrlError } from './fetch-page.js';
 
 /**
  * Cloud Function to extract metadata (title, description) from a URL.
  * This is a callable function that requires the user to be authenticated.
+ * It only fetches public http(s) pages; see fetch-page.js.
  */
 export const extractMetadata = onCall(
   {
     cors: true,
     maxInstances: 10,
+    timeoutSeconds: 20,
   },
   async (request) => {
     // Verify the user is authenticated
@@ -20,46 +22,24 @@ export const extractMetadata = onCall(
       );
     }
 
-    const { url } = request.data;
+    const { url } = request.data ?? {};
 
-    if (!url) {
+    if (typeof url !== 'string' || !url.trim()) {
       throw new HttpsError('invalid-argument', 'URL is required');
     }
 
-    // Validate URL format
     try {
-      new URL(url);
-    } catch {
-      throw new HttpsError('invalid-argument', 'Invalid URL format');
-    }
-
-    try {
-      const response = await fetch(url, {
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          Accept:
-            'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.5',
-        },
-        timeout: 10000,
-      });
-
-      if (!response.ok) {
-        throw new HttpsError(
-          'unavailable',
-          `Failed to fetch URL: HTTP ${response.status}`
-        );
+      const html = await fetchPageStart(url.trim());
+      if (!html) {
+        return { title: '', description: '' };
       }
-
-      const html = await response.text();
       const $ = cheerio.load(html);
 
       // Extract title (priority: og:title > twitter:title > title tag)
       let title =
         $('meta[property="og:title"]').attr('content') ||
         $('meta[name="twitter:title"]').attr('content') ||
-        $('title').text() ||
+        $('title').first().text() ||
         '';
 
       // Extract description (priority: og:description > twitter:description > meta description)
@@ -70,14 +50,19 @@ export const extractMetadata = onCall(
         '';
 
       // Clean up whitespace
-      title = title.trim();
-      description = description.trim();
+      title = title.replace(/\s+/g, ' ').trim().slice(0, 500);
+      description = description.replace(/\s+/g, ' ').trim().slice(0, 2000);
 
       return { title, description };
     } catch (error) {
-      // If it's already an HttpsError, rethrow it
-      if (error instanceof HttpsError) {
-        throw error;
+      if (error instanceof RefusedUrlError) {
+        throw new HttpsError('invalid-argument', error.message);
+      }
+      if (error?.name === 'AbortError') {
+        throw new HttpsError('deadline-exceeded', 'The page took too long to respond');
+      }
+      if (error?.status) {
+        throw new HttpsError('unavailable', error.message);
       }
 
       console.error('Error extracting metadata:', error);
@@ -88,4 +73,3 @@ export const extractMetadata = onCall(
     }
   }
 );
-
